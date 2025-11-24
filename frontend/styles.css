@@ -1,172 +1,314 @@
-:root {
-  color-scheme: dark;
-  font-family: "Segoe UI", sans-serif;
+/* Genel görünüm */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
 }
 
 body {
   margin: 0;
-  background: #111;
-  color: #eee;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background-color: #000;
+  color: #fff;
 }
+
+/* Header */
+
+.app-header {
+  padding: 16px 24px;
+  border-bottom: 1px solid #333;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.app-header h1 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.app-subtitle {
+  font-size: 12px;
+  color: #999;
+}
+
+/* Layout */
 
 .container {
-  max-width: 1200px;
+  max-width: 1100px;
   margin: 0 auto;
-  padding: 2rem 1.5rem 3rem;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-  gap: 1.5rem;
+  padding: 24px 16px 64px;
 }
 
-.panel {
-  background: #1b1b1b;
-  padding: 1.5rem;
-  border: 1px solid #2e2e2e;
+.screen {
+  display: none;
+}
+
+.screen.active {
+  display: block;
+}
+
+.layout {
+  display: flex;
+  gap: 16px;
+}
+
+.column {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.column-main {
+  flex: 2;
+}
+
+.column-side {
+  flex: 1;
+}
+
+/* Kartlar */
+
+.card {
+  border: 1px solid #fff;
   border-radius: 8px;
+  padding: 16px;
+  background-color: #000;
 }
 
-.hero,
-.lobby-panel {
-  grid-column: 1 / -1;
+/* Form & butonlar */
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
 }
 
-.panel-header {
+.form-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+label {
+  font-size: 12px;
+  color: #bbb;
+}
+
+input {
+  flex: 1;
+  padding: 8px 10px;
+  border-radius: 4px;
+  border: 1px solid #fff;
+  background-color: #000;
+  color: #fff;
+  font-size: 14px;
+}
+
+input::placeholder {
+  color: #555;
+}
+
+button {
+  padding: 8px 14px;
+  border-radius: 4px;
+  border: 1px solid #fff;
+  background-color: #fff;
+  color: #000;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+button:hover {
+  background-color: #000;
+  color: #fff;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.secondary-button {
+  background-color: #000;
+  color: #fff;
+}
+
+.secondary-button:hover {
+  background-color: #fff;
+  color: #000;
+}
+
+/* Divider */
+
+.divider {
+  text-align: center;
+  color: #666;
+  font-size: 12px;
+  margin: 12px 0;
+}
+
+/* Lobby header */
+
+.lobby-header {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+
+.lobby-header .label {
+  color: #777;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.lobby-header .value {
+  font-weight: 600;
+}
+
+.controls {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.you-info {
+  font-size: 13px;
+  color: #ccc;
+  margin-bottom: 12px;
+}
+
+/* Guess panel */
+
+.guess-panel {
+  margin-top: 8px;
+}
+
+.help-text {
+  font-size: 12px;
+  color: #888;
+  margin-top: 4px;
+}
+
+.error-text {
+  font-size: 12px;
+  color: #ff6b6b;
+  min-height: 16px;
+}
+
+#guess-result {
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.guess-result-good {
+  color: #a5ff7a;
+}
+
+.guess-result-neutral {
+  color: #ddd;
+}
+
+.guess-result-bad {
+  color: #ffb86c;
+}
+
+/* Tablo */
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.table th,
+.table td {
+  border-bottom: 1px solid #333;
+  padding: 6px 4px;
+  text-align: left;
+}
+
+.table th {
+  font-weight: 600;
+}
+
+.table tr:last-child td {
+  border-bottom: none;
+}
+
+/* Log */
+
+.log {
+  max-height: 240px;
+  overflow-y: auto;
+  font-size: 12px;
+}
+
+.log-line {
+  padding: 2px 0;
+  color: #ccc;
+}
+
+/* Modal */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.modal-backdrop.hidden {
+  display: none;
+}
+
+.modal {
+  width: 420px;
+  max-width: 95vw;
+  border: 1px solid #fff;
+  border-radius: 8px;
+  padding: 16px;
+  background-color: #000;
+}
+
+.modal-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
 }
 
-.status-grid {
-  margin-top: 1rem;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 1rem;
+.close-button {
+  padding: 4px 8px;
+  font-size: 14px;
 }
 
-.status-card {
-  background: #131313;
-  border: 1px solid #2a2a2a;
-  border-radius: 8px;
-  padding: 0.75rem 1rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
+.modal-body h3 {
+  margin-top: 12px;
+  margin-bottom: 4px;
 }
 
-.status-card strong {
-  font-size: 1.75rem;
+.leader-me {
+  font-size: 13px;
+  color: #ddd;
 }
 
-.status-card small {
-  color: #b8b8b8;
-}
+/* Küçük ekran ayarları */
 
-.status-card.controls {
-  gap: 0.5rem;
-}
+@media (max-width: 768px) {
+  .layout {
+    flex-direction: column;
+  }
 
-button {
-  background: #eee;
-  color: #111;
-  border: none;
-  padding: 0.5rem 0.75rem;
-  border-radius: 4px;
-  cursor: pointer;
-  margin-top: 0.5rem;
+  .lobby-header {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
-
-button:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-button.ghost {
-  background: transparent;
-  color: #eee;
-  border: 1px solid #444;
-}
-
-input {
-  width: 100%;
-  padding: 0.5rem;
-  border-radius: 4px;
-  border: 1px solid #3a3a3a;
-  background: #111;
-  color: #eee;
-  margin-top: 0.25rem;
-}
-
-label {
-  display: block;
-  margin-bottom: 0.35rem;
-  font-size: 0.85rem;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: #999;
-}
-
-.form-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 1.5rem;
-}
-
-.control-row {
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
-}
-
-.table-wrapper {
-  margin-top: 1rem;
-  overflow-x: auto;
-}
-
-table {
-  width: 100%;
-  border-collapse: collapse;
-}
-
-th,
-td {
-  padding: 0.75rem 0.5rem;
-  border-bottom: 1px solid #2a2a2a;
-}
-
-tr:nth-child(even) {
-  background: rgba(255, 255, 255, 0.02);
-}
-
-.hidden {
-  display: none;
-}
-
-.feedback {
-  min-height: 1.5rem;
-  margin-top: 0.75rem;
-  font-weight: 500;
-}
-
-.round-info {
-  min-height: 1.25rem;
-  font-size: 0.95rem;
-  color: #b5b5b5;
-}
-
-ol {
-  padding-left: 1.5rem;
-}
-
-.session-info {
-  margin-top: 1rem;
-  padding: 0.75rem;
-  border: 1px dashed #3a3a3a;
-  border-radius: 6px;
-  font-size: 0.9rem;
-}
-
-#secret-display {
-  letter-spacing: 0.15em;
-  font-weight: 600;
-}
-

@@ -1,177 +1,495 @@
 const state = {
   lobbyId: null,
   playerId: null,
-  hostId: null,
+  playerName: null,
+  isOwner: false,
+  lobby: null,
   ws: null,
+  timerIntervalId: null,
 };
 
-const els = {
-  createName: document.getElementById("create-name"),
-  createBtn: document.getElementById("create-btn"),
-  joinName: document.getElementById("join-name"),
-  joinLobby: document.getElementById("join-lobby"),
-  joinBtn: document.getElementById("join-btn"),
-  sessionInfo: document.getElementById("session-info"),
-  lobbyStatus: document.getElementById("lobby-status"),
-  timer: document.getElementById("timer"),
-  secretDisplay: document.getElementById("secret-display"),
-  guessInput: document.getElementById("guess-input"),
-  guessBtn: document.getElementById("guess-btn"),
-  startBtn: document.getElementById("start-btn"),
-  feedback: document.getElementById("feedback"),
-  roundInfo: document.getElementById("round-info"),
-  scoreBody: document.getElementById("score-body"),
-  leaderTop: document.getElementById("leader-top"),
-  leaderSelf: document.getElementById("leader-self"),
-};
+// DOM referansları
+const screenWelcome = document.getElementById("screen-welcome");
+const screenLobby = document.getElementById("screen-lobby");
 
-els.createBtn.addEventListener("click", async () => {
-  if (!els.createName.value.trim()) return;
-  const res = await fetch("/api/lobbies", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: els.createName.value }),
-  });
-  const data = await res.json();
-  applySession(data);
-});
+const inputName = document.getElementById("input-name");
+const inputLobbyId = document.getElementById("input-lobby-id");
+const btnCreateLobby = document.getElementById("btn-create-lobby");
+const btnJoinLobby = document.getElementById("btn-join-lobby");
+const welcomeError = document.getElementById("welcome-error");
 
-els.joinBtn.addEventListener("click", async () => {
-  if (!els.joinLobby.value.trim() || !els.joinName.value.trim()) return;
-  const res = await fetch(`/api/lobbies/${els.joinLobby.value.trim()}/join`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: els.joinName.value }),
-  });
-  if (!res.ok) {
-    const error = await res.json();
-    alert(error.detail || "Unable to join lobby");
-    return;
-  }
-  const data = await res.json();
-  applySession(data);
-});
+const lblLobbyId = document.getElementById("lbl-lobby-id");
+const lblStatus = document.getElementById("lbl-status");
+const lblRound = document.getElementById("lbl-round");
+const lblTimer = document.getElementById("lbl-timer");
+const btnStartGame = document.getElementById("btn-start-game");
+const btnShowLeaderboard = document.getElementById("btn-show-leaderboard");
+const youInfo = document.getElementById("you-info");
 
-els.guessBtn.addEventListener("click", () => {
-  const guess = els.guessInput.value.trim();
-  if (!state.ws || guess.length !== 4 || !/^[0-9]{4}$/.test(guess)) {
-    return;
-  }
-  state.ws.send(JSON.stringify({ type: "submit_guess", payload: { guess } }));
-  els.guessInput.value = "";
-});
+const inputGuess = document.getElementById("input-guess");
+const btnSubmitGuess = document.getElementById("btn-submit-guess");
+const guessHelp = document.getElementById("guess-help");
+const guessError = document.getElementById("guess-error");
+const guessResult = document.getElementById("guess-result");
 
-els.startBtn.addEventListener("click", () => {
-  if (!state.ws) return;
-  state.ws.send(JSON.stringify({ type: "start_game" }));
-});
+const playersTableBody = document.getElementById("players-table-body");
+const logContainer = document.getElementById("log");
 
-function applySession({ lobby_id, player_id }) {
-  state.lobbyId = lobby_id;
-  state.playerId = player_id;
-  els.sessionInfo.classList.remove("hidden");
-  els.sessionInfo.innerText = `Lobby ${lobby_id} • Player ID ${player_id}`;
-  connectWs();
-  refreshLeaderboard();
+// Leaderboard modal
+const leaderboardModal = document.getElementById("leaderboard-modal");
+const btnCloseLeaderboard = document.getElementById("btn-close-leaderboard");
+const leaderboardTop = document.getElementById("leaderboard-top");
+const leaderboardMe = document.getElementById("leaderboard-me");
+
+// Ekran değiştirme
+function showWelcomeScreen() {
+  screenWelcome.classList.add("active");
+  screenLobby.classList.remove("active");
 }
 
-function connectWs() {
+function showLobbyScreen() {
+  screenWelcome.classList.remove("active");
+  screenLobby.classList.add("active");
+}
+
+// Log
+function addLogLine(text) {
+  const line = document.createElement("div");
+  line.className = "log-line";
+  const timestamp = new Date().toLocaleTimeString("tr-TR", {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+  line.textContent = `[${timestamp}] ${text}`;
+  logContainer.appendChild(line);
+  logContainer.scrollTop = logContainer.scrollHeight;
+}
+
+// Timer
+function startTimer(deadline) {
+  stopTimer();
+  if (!deadline) {
+    lblTimer.textContent = "—";
+    return;
+  }
+
+  function update() {
+    const now = Date.now() / 1000;
+    let remaining = Math.max(0, Math.floor(deadline - now));
+    const m = String(Math.floor(remaining / 60)).padStart(2, "0");
+    const s = String(remaining % 60).padStart(2, "0");
+    lblTimer.textContent = `${m}:${s}`;
+  }
+
+  update();
+  state.timerIntervalId = setInterval(update, 1000);
+}
+
+function stopTimer() {
+  if (state.timerIntervalId !== null) {
+    clearInterval(state.timerIntervalId);
+    state.timerIntervalId = null;
+  }
+}
+
+// Lobby render
+function renderLobby() {
+  const lobby = state.lobby;
+  if (!lobby) return;
+
+  lblLobbyId.textContent = lobby.lobby_id;
+  lblStatus.textContent =
+    lobby.status === "waiting"
+      ? "Bekliyor"
+      : lobby.status === "running"
+      ? "Oynanıyor"
+      : "Bitti";
+
+  lblRound.textContent = lobby.round_no || "-";
+
+  if (lobby.status === "running" && lobby.round_deadline) {
+    startTimer(lobby.round_deadline);
+  } else {
+    stopTimer();
+    lblTimer.textContent = lobby.status === "finished" ? "00:00" : "—";
+  }
+
+  const me = lobby.players.find((p) => p.player_id === state.playerId);
+  const roleText = state.isOwner
+    ? "Lobi sahibi"
+    : me && me.is_spectator
+    ? "Seyirci"
+    : "Oyuncu";
+
+  youInfo.textContent = `Sen: ${state.playerName} (${roleText}). Lobideki skorun: ${
+    me ? me.score : 0
+  }`;
+
+  // Start düğmesini sadece owner görsün
+  btnStartGame.style.display = state.isOwner ? "inline-block" : "none";
+  btnStartGame.disabled = lobby.status !== "waiting";
+
+  // Tahmin input durumu
+  let guessDisabled = false;
+  let guessHelper = "";
+
+  if (lobby.status !== "running") {
+    guessDisabled = true;
+    guessHelper =
+      lobby.status === "waiting"
+        ? "Oyun başlamadı. Owner başlatınca tahmin yapabilirsin."
+        : "Oyun bitti. Owner yeni bir oyun başlatana kadar bekleyin.";
+  } else if (me && me.is_spectator) {
+    guessDisabled = true;
+    guessHelper = "Seyircisin. Yeni oyun başlayana kadar tahmin yapamazsın.";
+  } else if (me && me.has_solved) {
+    guessDisabled = true;
+    guessHelper = "Sayiyi bildin! Diğer oyuncuları bekliyorsun.";
+  }
+
+  inputGuess.disabled = guessDisabled;
+  btnSubmitGuess.disabled = guessDisabled;
+  guessHelp.textContent =
+    guessHelper ||
+    "Oyun başladıktan sonra her turda 1 tahmin yapabilirsin. Hiç rakam tutmazsa bonus puan!";
+
+  // Oyuncu tablosu
+  playersTableBody.innerHTML = "";
+  lobby.players
+    .slice()
+    .sort((a, b) => b.score - a.score)
+    .forEach((p) => {
+      const tr = document.createElement("tr");
+      const isMe = p.player_id === state.playerId;
+
+      const tdName = document.createElement("td");
+      tdName.textContent = isMe ? `${p.name} (sen)` : p.name;
+
+      const tdRole = document.createElement("td");
+      if (p.player_id === lobby.owner_id) {
+        tdRole.textContent = "Owner";
+      } else if (p.is_spectator) {
+        tdRole.textContent = "Seyirci";
+      } else {
+        tdRole.textContent = "Oyuncu";
+      }
+
+      const tdScore = document.createElement("td");
+      tdScore.textContent = p.score;
+
+      const tdStatus = document.createElement("td");
+      if (p.has_solved) {
+        tdStatus.textContent = "Bildi";
+      } else if (p.is_spectator) {
+        tdStatus.textContent = "—";
+      } else {
+        tdStatus.textContent = "Oynuyor";
+      }
+
+      tr.appendChild(tdName);
+      tr.appendChild(tdRole);
+      tr.appendChild(tdScore);
+      tr.appendChild(tdStatus);
+      playersTableBody.appendChild(tr);
+    });
+}
+
+// WebSocket
+function connectWebSocket() {
   if (!state.lobbyId || !state.playerId) return;
-  if (state.ws) state.ws.close();
 
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-  state.ws = new WebSocket(
-    `${protocol}://${window.location.host}/ws/lobby/${state.lobbyId}?player_id=${state.playerId}`
-  );
+  const wsUrl = `${protocol}://${window.location.host}/ws/lobby/${state.lobbyId}?player_id=${state.playerId}`;
+  const ws = new WebSocket(wsUrl);
+  state.ws = ws;
 
-  state.ws.onmessage = (event) => {
+  ws.onopen = () => {
+    addLogLine("WebSocket bağlantısı kuruldu.");
+  };
+
+  ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
-    switch (msg.type) {
-      case "lobby_state":
-      case "game_started":
-      case "score_update":
-      case "game_over":
-        updateLobby(msg.payload);
-        break;
-      case "timer_update":
-        els.timer.innerText = msg.payload.remaining_seconds;
-        break;
-      case "guess_result":
-        showFeedback(msg.payload);
-        refreshLeaderboard();
-        break;
-      case "error":
-        alert(msg.payload.message);
-        break;
-    }
+    handleWsMessage(msg);
   };
 
-  state.ws.onclose = () => {
-    state.ws = null;
+  ws.onclose = () => {
+    addLogLine("WebSocket bağlantısı kapandı.");
+  };
+
+  ws.onerror = () => {
+    addLogLine("WebSocket hatası oluştu.");
   };
 }
 
-function updateLobby(payload) {
-  state.hostId = payload.host_id;
-  els.lobbyStatus.innerText = `Status: ${payload.status}`;
-  els.timer.innerText = payload.status === "running" ? payload.remaining_seconds ?? "--" : "--";
+function sendWsMessage(message) {
+  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+  state.ws.send(JSON.stringify(message));
+}
 
-  const rows = payload.players
-    .map(
-      (p, idx) => `
-        <tr>
-          <td>${idx + 1}</td>
-          <td>${p.name}${p.player_id === state.hostId ? " ★" : ""}</td>
-          <td>${p.score}</td>
-          <td>${p.round_score}</td>
-          <td>${p.guessed_correctly ? "Solved" : p.can_guess ? "Ready" : "Spectator"}</td>
-        </tr>
-      `
-    )
-    .join("");
-  els.scoreBody.innerHTML = rows;
+function handleWsMessage(msg) {
+  const { type, payload } = msg;
 
-  const me = payload.players.find((p) => p.player_id === state.playerId);
-  const canGuess = payload.status === "running" && me?.can_guess && !me?.guessed_correctly;
-  els.guessBtn.disabled = !canGuess;
-  els.guessInput.disabled = !canGuess;
-  els.startBtn.disabled = !(state.playerId === state.hostId && payload.status !== "running");
+  switch (type) {
+    case "connected":
+      addLogLine(`Lobiye bağlandın (id: ${payload.lobby_id}).`);
+      break;
 
-  if (payload.revealed_secret) {
-    els.secretDisplay.innerText = payload.revealed_secret;
-    els.roundInfo.innerText = `Round tamamlandı. Sayı ${payload.revealed_secret}. Yeni round için hostu bekleyin.`;
-  } else if (payload.status === "running") {
-    els.secretDisplay.innerText = "????";
-    els.roundInfo.innerText = "Tahmin penceresi açık.";
-  } else if (payload.status === "waiting") {
-    els.secretDisplay.innerText = "????";
-    els.roundInfo.innerText = "Host yeni round başlatabilir.";
-  } else {
-    els.secretDisplay.innerText = "????";
-    els.roundInfo.innerText = "";
+    case "lobby_state":
+      state.lobby = payload;
+      renderLobby();
+      addLogLine("Lobi durumu güncellendi.");
+      break;
+
+    case "player_joined":
+      addLogLine(`Oyuncu katıldı: ${payload.name} (${payload.is_spectator ? "Seyirci" : "Oyuncu"})`);
+      if (state.lobby) {
+        state.lobby.players.push({
+          player_id: payload.player_id,
+          name: payload.name,
+          is_spectator: payload.is_spectator,
+          score: 0,
+          has_solved: false,
+        });
+        renderLobby();
+      }
+      break;
+
+    case "round_started":
+      if (state.lobby) {
+        state.lobby.status = "running";
+        state.lobby.round_no = payload.round_no;
+        state.lobby.round_deadline = payload.round_deadline;
+      }
+      addLogLine(`Yeni tur başladı: #${payload.round_no}`);
+      renderLobby();
+      break;
+
+    case "lobby_update":
+      state.lobby = payload;
+      renderLobby();
+      break;
+
+    case "guess_result":
+      showGuessResult(payload);
+      break;
+
+    case "game_finished":
+      handleGameFinished(payload);
+      break;
+
+    case "error":
+      handleError(payload);
+      break;
+
+    default:
+      addLogLine(`Bilinmeyen mesaj tipi alındı: ${type}`);
   }
 }
 
-function showFeedback(payload) {
-  const parts = [];
-  parts.push(`+${payload.plus} / -${payload.minus}`);
-  if (payload.is_clean_miss) parts.push("Bonus +5");
-  if (payload.position) parts.push(`Position ${payload.position}`);
-  parts.push(`Δ ${payload.delta}`);
-  els.feedback.innerText = parts.join(" • ");
+// Tahmin sonucu UI
+function showGuessResult(payload) {
+  const { guess, plus, minus, bonus_points, score_change, total_score, is_correct } = payload;
+
+  let text = `Tahminin ${guess} → `;
+  if (is_correct) {
+    text += `TEBRİKLER! Doğru bildin. (+${score_change} puan)`;
+    guessResult.className = "guess-result guess-result-good";
+  } else if (plus === 0 && minus === 0) {
+    text += `Hiç rakam tutmadı. Bonus: +${bonus_points} puan, toplam değişim: +${score_change}`;
+    guessResult.className = "guess-result guess-result-bad";
+  } else {
+    text += `+${plus}, -${minus}, puan değişimi: ${score_change >= 0 ? "+" : ""}${score_change}`;
+    guessResult.className = "guess-result guess-result-neutral";
+  }
+  guessResult.textContent = text;
+
+  addLogLine(text + ` | Yeni skorun: ${total_score}`);
+
+  // inputu temizle
+  inputGuess.value = "";
 }
 
-async function refreshLeaderboard() {
+// Oyun bitti
+function handleGameFinished(payload) {
+  stopTimer();
+
+  if (state.lobby) {
+    state.lobby.status = "finished";
+  }
+
+  let reasonText = "Oyun bitti.";
+  if (payload.reason === "all_solved") {
+    reasonText = "Lobideki herkes sayıyı bildi, oyun bitti.";
+  } else if (payload.reason === "max_rounds") {
+    reasonText = "Maksimum tur sayısına ulaşıldı, oyun bitti.";
+  } else if (payload.reason === "no_active_players") {
+    reasonText = "Aktif oyuncu kalmadı, oyun bitti.";
+  }
+
+  addLogLine(`${reasonText} Gizli sayı: ${payload.secret_number}`);
+
+  if (payload.scores && payload.scores.length) {
+    const sorted = payload.scores.slice().sort((a, b) => b.score - a.score);
+    addLogLine("Final skorlar:");
+    sorted.forEach((p, idx) => {
+      addLogLine(
+        `#${idx + 1} ${p.name} → ${p.score} puan${
+          p.player_id === state.playerId ? " (sen)" : ""
+        }`
+      );
+    });
+  }
+
+  renderLobby();
+}
+
+// Hata mesajı
+function handleError(payload) {
+  const message = payload?.message || "Bilinmeyen hata";
+  guessError.textContent = message;
+  addLogLine(`Hata: ${message}`);
+}
+
+// HTTP helper
+async function postJson(url, data) {
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    const detail = err?.detail || resp.statusText;
+    throw new Error(detail);
+  }
+  return resp.json();
+}
+
+async function getJson(url) {
+  const resp = await fetch(url);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    const detail = err?.detail || resp.statusText;
+    throw new Error(detail);
+  }
+  return resp.json();
+}
+
+// Event listeners
+
+btnCreateLobby.addEventListener("click", async () => {
+  welcomeError.textContent = "";
+  const name = inputName.value.trim();
+  if (!name) {
+    welcomeError.textContent = "Lütfen bir kullanıcı adı gir.";
+    return;
+  }
+
+  try {
+    const data = await postJson("/api/lobbies", { name });
+    state.playerName = name;
+    state.playerId = data.player_id;
+    state.lobbyId = data.lobby_id;
+    state.isOwner = true;
+
+    showLobbyScreen();
+    connectWebSocket();
+    addLogLine(`Yeni lobi kuruldu. ID: ${data.lobby_id}`);
+  } catch (err) {
+    welcomeError.textContent = err.message || "Lobi oluşturulurken hata oluştu.";
+  }
+});
+
+btnJoinLobby.addEventListener("click", async () => {
+  welcomeError.textContent = "";
+  const name = inputName.value.trim();
+  const lobbyIdRaw = inputLobbyId.value.trim();
+  const lobbyId = lobbyIdRaw.toUpperCase();
+
+  if (!name || !lobbyId) {
+    welcomeError.textContent = "Kullanıcı adı ve lobi ID gerekli.";
+    return;
+  }
+
+  try {
+    const data = await postJson(`/api/lobbies/${lobbyId}/join`, { name });
+    state.playerName = name;
+    state.playerId = data.player_id;
+    state.lobbyId = data.lobby_id;
+    state.isOwner = false;
+
+    showLobbyScreen();
+    connectWebSocket();
+    addLogLine(`Lobiye katıldın. ID: ${data.lobby_id}`);
+  } catch (err) {
+    welcomeError.textContent = err.message || "Lobiye katılırken hata oluştu.";
+  }
+});
+
+btnStartGame.addEventListener("click", () => {
+  guessError.textContent = "";
+  sendWsMessage({ type: "start_game" });
+});
+
+btnSubmitGuess.addEventListener("click", () => {
+  guessError.textContent = "";
+  const guess = inputGuess.value.trim();
+
+  if (!/^\d{4}$/.test(guess)) {
+    guessError.textContent = "Tahmin 4 haneli bir sayı olmalı.";
+    return;
+  }
+
+  sendWsMessage({
+    type: "submit_guess",
+    payload: { guess },
+  });
+});
+
+// Enter ile submit kolaylığı
+inputGuess.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    btnSubmitGuess.click();
+  }
+});
+
+// Leaderboard modal
+btnShowLeaderboard.addEventListener("click", async () => {
   if (!state.playerId) return;
-  const res = await fetch(`/api/leaderboard/${state.playerId}`);
-  const data = await res.json();
-  els.leaderTop.innerHTML = data.top
-    .map((entry) => `<li>${entry.name}: ${entry.score}</li>`)
-    .join("");
-  if (data.self) {
-    els.leaderSelf.innerText = `${data.self.name}, you are #${data.self.rank} with ${data.self.score} pts`;
-  } else {
-    els.leaderSelf.innerText = "";
-  }
-}
+  try {
+    const data = await getJson(`/api/leaderboard/${state.playerId}`);
 
+    leaderboardTop.innerHTML = "";
+    data.top.forEach((p, idx) => {
+      const tr = document.createElement("tr");
+      const tdRank = document.createElement("td");
+      tdRank.textContent = idx + 1;
+      const tdName = document.createElement("td");
+      tdName.textContent = p.name;
+      const tdScore = document.createElement("td");
+      tdScore.textContent = p.score;
+      tr.appendChild(tdRank);
+      tr.appendChild(tdName);
+      tr.appendChild(tdScore);
+      leaderboardTop.appendChild(tr);
+    });
+
+    const me = data.me;
+    const rankText =
+      me.rank != null ? `Sıran: ${me.rank}` : "Henüz sıralamada değilsin.";
+    leaderboardMe.textContent = `${me.name} → Skor: ${me.score}. ${rankText}`;
+
+    leaderboardModal.classList.remove("hidden");
+  } catch (err) {
+    addLogLine(`Leaderboard alınırken hata: ${err.message}`);
+  }
+});
+
+btnCloseLeaderboard.addEventListener("click", () => {
+  leaderboardModal.classList.add("hidden");
+});
+
+// Başlangıç ekranı
+showWelcomeScreen();
