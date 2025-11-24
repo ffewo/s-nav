@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Realtime Guessing Game</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <section class="panel hero">
+        <h1>4-Digit Guess</h1>
+        <div class="form-grid">
+          <div>
+            <h2>Create Lobby</h2>
+            <label>
+              Name
+              <input id="create-name" type="text" placeholder="Ayse" />
+            </label>
+            <button id="create-btn">Create</button>
+          </div>
+          <div>
+            <h2>Join Lobby</h2>
+            <label>
+              Lobby ID
+              <input id="join-lobby" type="text" placeholder="abc123" />
+            </label>
+            <label>
+              Name
+              <input id="join-name" type="text" placeholder="Mehmet" />
+            </label>
+            <button id="join-btn">Join</button>
+          </div>
+        </div>
+        <div id="session-info" class="session-info hidden"></div>
+      </section>
+
+      <section class="panel lobby-panel">
+        <header class="panel-header">
+          <div>
+            <h2>Lobby</h2>
+            <p id="lobby-status">Waiting for lobby...</p>
+          </div>
+        </header>
+        <div class="status-grid">
+          <div class="status-card">
+            <span>Kalan Süre</span>
+            <strong id="timer">--</strong>
+          </div>
+          <div class="status-card">
+            <span>Son Gizli Sayı</span>
+            <strong id="secret-display">????</strong>
+            <small>Round bitince açıklanır</small>
+          </div>
+          <div class="status-card controls">
+            <label>Tahmin</label>
+            <div class="control-row">
+              <input id="guess-input" type="text" maxlength="4" placeholder="1234" />
+              <button id="guess-btn" disabled>Gönder</button>
+            </div>
+            <button id="start-btn" class="ghost" disabled>Yeni Round Başlat</button>
+          </div>
+        </div>
+        <div id="feedback" class="feedback"></div>
+        <div id="round-info" class="round-info"></div>
+        <div class="table-wrapper">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Player</th>
+                <th>Total</th>
+                <th>Round</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="score-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Global Leaderboard</h2>
+        <ol id="leader-top"></ol>
+        <p id="leader-self"></p>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
+
