@@ -1,4 +1,26 @@
-fastapi==0.110.1
-uvicorn[standard]==0.29.0
-pytest==8.2.2
+# Sınav Sistemi - Gerekli Python Kütüphaneleri
 
+# Sistem ve işlem yönetimi
+psutil>=5.8.0
+
+# Standart kütüphaneler (Python ile birlikte gelir)
+# tkinter - GUI framework
+# socket - Ağ iletişimi  
+# threading - Çoklu thread desteği
+# json - JSON veri işleme
+# hashlib - Hash fonksiyonları
+# secrets - Güvenli rastgele sayı üretimi
+# logging - Loglama sistemi
+# os - İşletim sistemi arayüzü
+# time - Zaman fonksiyonları
+# datetime - Tarih/saat işlemleri
+# shutil - Dosya işlemleri
+# re - Düzenli ifadeler
+# typing - Tip belirteçleri
+
+# Opsiyonel geliştirmeler için
+# Eğer gelecekte bu kütüphaneler eklenirse:
+# cryptography>=3.4.8  # Gelişmiş şifreleme
+# Pillow>=8.3.2        # Görüntü işleme
+# requests>=2.26.0     # HTTP istekleri
+# sqlite3              # Veritabanı (Python ile birlikte gelir)

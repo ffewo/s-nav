@@ -1,0 +1,50 @@
+{
+    "server": {
+        "host": "0.0.0.0",
+        "port": 2121,
+        "max_connections": 50,
+        "buffer_size": 4096,
+        "heartbeat_interval": 30,
+        "connection_timeout": 300,
+        "max_file_size_mb": 50
+    },
+    "client": {
+        "server_ip": "127.0.0.1",
+        "reconnect_attempts": 5,
+        "reconnect_delay": 3,
+        "heartbeat_interval": 30
+    },
+    "security": {
+        "banned_applications": [
+            "chrome.exe",
+            "firefox.exe", 
+            "msedge.exe",
+            "opera.exe",
+            "safari.exe",
+            "brave.exe"
+        ],
+        "allowed_file_extensions": [
+            ".pdf", ".doc", ".docx", ".txt", ".rtf",
+            ".jpg", ".jpeg", ".png", ".gif",
+            ".zip", ".rar", ".7z"
+        ]
+    },
+    "exam": {
+        "default_duration_minutes": 120,
+        "warning_time_minutes": 10,
+        "auto_submit_on_time_up": true,
+        "allow_multiple_submissions": false
+    },
+    "logging": {
+        "level": "INFO",
+        "max_log_size_mb": 10,
+        "backup_count": 5
+    },
+    "ui": {
+        "window_width": 900,
+        "window_height": 600,
+        "theme": "default",
+        "font_family": "Arial",
+        "font_size": 10
+    }
+}

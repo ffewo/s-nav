@@ -1,59 +1,236 @@
-## Multiplayer 4-Digit Guessing Game
+# Sınav Sistemi - Güvenli Çevrimiçi Sınav Platformu
 
-Realtime WebSocket-powered guessing game with FastAPI backend and lightweight vanilla frontend.
+Bu proje, güvenli ve güvenilir çevrimiçi sınav yönetimi için geliştirilmiş bir masaüstü uygulamasıdır.
 
-### Features
+## 🚀 Özellikler
 
-- Lobby creation/join with unique IDs
-- Single-round games with 100s timers and live score updates
-- Rich scoring (+/- counts, early winner bonuses, clean-miss rewards)
-- Global leaderboard (top 3 + personal rank)
-- Dockerized for consistent local usage
+### Güvenlik
+- ✅ Gelişmiş şifre hash'leme (PBKDF2)
+- ✅ IP tabanlı başarısız giriş koruması
+- ✅ Dosya içeriği güvenlik taraması
+- ✅ Yasaklı uygulama engelleme
+- ✅ Güvenli dosya adı oluşturma
+- ✅ Kapsamlı güvenlik loglama
 
-### Running Locally
+### Ağ ve Bağlantı
+- ✅ Otomatik yeniden bağlanma
+- ✅ Heartbeat monitoring
+- ✅ Zaman aşımı yönetimi
+- ✅ Bağlantı durumu takibi
+- ✅ Hata toleransı
+
+### Dosya Yönetimi
+- ✅ Güvenli dosya transferi
+- ✅ Dosya bütünlüğü kontrolü
+- ✅ Otomatik yedekleme
+- ✅ Metadata yönetimi
+- ✅ Transfer ilerleme takibi
+
+### Kullanıcı Arayüzü
+- ✅ Modern ve kullanıcı dostu tasarım
+- ✅ Gerçek zamanlı durum güncellemeleri
+- ✅ Detaylı istatistikler
+- ✅ Emoji destekli görsel geri bildirim
+- ✅ Responsive tasarım
+
+### Yönetim
+- ✅ JSON tabanlı konfigürasyon
+- ✅ Kapsamlı loglama sistemi
+- ✅ Öğrenci aktivite takibi
+- ✅ Sınav süre yönetimi
+- ✅ Duyuru sistemi
+
+## 📋 Sistem Gereksinimleri
+
+- **İşletim Sistemi:** Windows 10/11, macOS 10.14+, Linux Ubuntu 18.04+
+- **Python:** 3.7 veya üzeri
+- **RAM:** En az 512 MB
+- **Disk Alanı:** En az 100 MB boş alan
+- **Ağ:** TCP/IP bağlantısı
+
+## 🛠️ Kurulum
+
+### 1. Gerekli Kütüphaneleri Yükleyin
 
 ```bash
-python -m venv .venv
-.venv\Scripts\activate  # Windows
-pip install -r requirements.txt
-uvicorn app.main:app --reload
+pip install psutil
 ```
 
-Visit http://localhost:8000 to load the frontend.
+### 2. Dosyaları İndirin
 
-### Docker
+Projeyi bilgisayarınıza indirin veya klonlayın.
+
+### 3. Konfigürasyon
+
+`config.json` dosyasını ihtiyaçlarınıza göre düzenleyin:
+
+```json
+{
+    "server": {
+        "host": "0.0.0.0",
+        "port": 2121,
+        "max_connections": 50
+    },
+    "client": {
+        "server_ip": "127.0.0.1"
+    }
+}
+```
+
+### 4. Öğrenci Veritabanı
+
+`students.txt` dosyasını oluşturun:
+
+```
+# Format: öğrenci_no:şifre:ad_soyad
+123456:password:Test Öğrenci
+415576:123456:Furkan Barış
+```
+
+## 🎯 Kullanım
+
+### Sunucu Başlatma (Öğretmen)
 
 ```bash
-docker-compose up --build
+python server.py
 ```
 
-Backend exposed on port `8000`.
+**Özellikler:**
+- 🚀 Sınavı başlatma ve süre ayarlama
+- 📢 Öğrencilere duyuru gönderme
+- 👥 Bağlı öğrencileri görüntüleme
+- 📊 Detaylı istatistikler
+- 🔒 Giriş kontrolü
 
-### WebSocket API
-
-- Endpoint: `/ws/lobby/{lobby_id}?player_id=...`
-- Message formats:
-  - Client → server: `{ "type": "submit_guess", "payload": { "guess": "1234" } }`
-    and `{ "type": "start_game" }`
-  - Server → client events include `lobby_state`, `game_started`, `timer_update`,
-    `score_update`, `game_over`, `guess_result`, `error`.
-
-### REST Helpers
-
-- `POST /api/lobbies` `{ "name": "Ayse" }` → returns lobby & player IDs (host)
-- `POST /api/lobbies/{lobby_id}/join` `{ "name": "Mehmet" }`
-- `POST /api/lobbies/{lobby_id}/start` `{ "player_id": "<host_id>" }`
-- `GET /api/lobbies/{lobby_id}` lobby snapshot
-- `GET /api/leaderboard/{player_id}` top 3 + personal rank
-
-### Tests
+### İstemci Başlatma (Öğrenci)
 
 ```bash
-pytest
+python client.py
 ```
 
-### Notes
+**Özellikler:**
+- 🔐 Güvenli giriş sistemi
+- 📁 Soru dosyalarını indirme
+- 📤 Cevap dosyası yükleme
+- ⏰ Gerçek zamanlı süre takibi
+- 🚫 Otomatik browser engelleme
 
-- Secret numbers use unique digits to ensure challenging clues.
-- Scoring constants documented in `app/game/logic.py`.
+## 📁 Dosya Yapısı
 
+```
+app/
+├── server.py              # Sunucu uygulaması
+├── client.py              # İstemci uygulaması
+├── config.json            # Konfigürasyon dosyası
+├── config_manager.py      # Konfigürasyon yöneticisi
+├── security_utils.py      # Güvenlik araçları
+├── file_manager.py        # Dosya yönetimi
+├── students.txt           # Öğrenci veritabanı
+├── Sorular/              # Soru dosyaları
+├── Cevaplar/             # Cevap dosyaları
+└── Logs/                 # Log dosyaları
+```
+
+## ⚙️ Konfigürasyon Seçenekleri
+
+### Sunucu Ayarları
+- `host`: Sunucu IP adresi
+- `port`: Sunucu portu
+- `max_connections`: Maksimum bağlantı sayısı
+- `max_file_size_mb`: Maksimum dosya boyutu (MB)
+
+### Güvenlik Ayarları
+- `banned_applications`: Yasaklı uygulamalar
+- `allowed_file_extensions`: İzin verilen dosya uzantıları
+
+### Sınav Ayarları
+- `default_duration_minutes`: Varsayılan sınav süresi
+- `warning_time_minutes`: Uyarı süresi
+- `auto_submit_on_time_up`: Süre bitince otomatik teslim
+
+## 🔧 Gelişmiş Özellikler
+
+### 1. Güvenlik Loglama
+
+Tüm güvenlik olayları `Logs/security.log` dosyasına kaydedilir:
+- Başarısız giriş denemeleri
+- Şüpheli dosya yüklemeleri
+- Yasaklı uygulama tespitleri
+
+### 2. Dosya Bütünlüğü
+
+Her yüklenen dosya için:
+- SHA-256 hash kontrolü
+- Boyut doğrulaması
+- Metadata kaydı
+
+### 3. Otomatik Yedekleme
+
+Kritik dosyalar otomatik olarak yedeklenir:
+- Öğrenci cevapları
+- Konfigürasyon dosyaları
+- Log dosyaları
+
+## 🐛 Sorun Giderme
+
+### Bağlantı Sorunları
+
+1. **Sunucu başlamıyor:**
+   - Port 2121'in kullanımda olmadığını kontrol edin
+   - Firewall ayarlarını kontrol edin
+   - Yönetici izinleri gerekebilir
+
+2. **İstemci bağlanamıyor:**
+   - `ip.txt` dosyasındaki IP adresini kontrol edin
+   - Sunucunun çalıştığından emin olun
+   - Ağ bağlantısını kontrol edin
+
+### Dosya Sorunları
+
+1. **Dosya yüklenmiyor:**
+   - Dosya boyutunu kontrol edin (max 50MB)
+   - Dosya uzantısının izinli olduğunu kontrol edin
+   - Disk alanını kontrol edin
+
+2. **Soru dosyaları görünmüyor:**
+   - `Sorular/` klasörünün var olduğunu kontrol edin
+   - Dosya izinlerini kontrol edin
+
+## 📊 Performans İpuçları
+
+1. **Ağ Optimizasyonu:**
+   - Buffer boyutunu ağ hızına göre ayarlayın
+   - Heartbeat aralığını optimize edin
+
+2. **Dosya Yönetimi:**
+   - Büyük dosyalar için chunk boyutunu artırın
+   - Eski log dosyalarını düzenli temizleyin
+
+3. **Güvenlik:**
+   - Şifre karmaşıklığını artırın
+   - IP kilitleme süresini ayarlayın
+
+## 🔄 Güncellemeler
+
+### v2.0 Yenilikleri
+- ✅ Gelişmiş güvenlik sistemi
+- ✅ Otomatik yeniden bağlanma
+- ✅ Dosya bütünlüğü kontrolü
+- ✅ Kapsamlı loglama
+- ✅ Modern UI tasarımı
+- ✅ Konfigürasyon yönetimi
+
+## 📞 Destek
+
+Sorunlarınız için:
+1. Log dosyalarını kontrol edin
+2. Konfigürasyon ayarlarını gözden geçirin
+3. Sistem gereksinimlerini kontrol edin
+
+## 📄 Lisans
+
+Bu proje eğitim amaçlı geliştirilmiştir.
+
+---
+
+**Not:** Bu sistem güvenlik odaklı tasarlanmıştır ancak kritik sınavlar için ek güvenlik önlemleri alınması önerilir.

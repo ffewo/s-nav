@@ -1,0 +1,76 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Log dosyaları
+*.log
+Logs/*.log
+
+# Geçici dosyalar
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+
+# IDE dosyaları
+.vscode/
+.idea/
+*.sublime-*
+
+# İşletim sistemi dosyaları
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Sınav sistemi özel dosyaları
+client.log
+server.log
+test_*.py
+ip.txt
+
+# Temizlik scripti (opsiyonel - geliştirme aracı)
+# cleanup.py
+
+# Cevap dosyaları (güvenlik için)
+Cevaplar/*
+!Cevaplar/.gitkeep
+
+# Geçici konfigürasyon dosyaları
+config.json.backup.*
+*.backup
+
+# Executable dosyalar
+*.exe
+*.msi
+*.deb
+*.rpm
+
+# Sıkıştırılmış dosyalar
+*.zip
+*.rar
+*.7z
+*.tar.gz
+
+# Veritabanı dosyaları
+*.db
+*.sqlite
+*.sqlite3

@@ -1,0 +1,8 @@
+# Öğrenci Veritabanı
+# Format: öğrenci_no:şifre:ad_soyad
+415576:123456:Furkan Barış
+123456:password:Test Öğrenci
+111111:111111:Demo User
+222222:abc123:Örnek Öğrenci
+333333:sinav2024:Deneme Kullanıcı
+
