@@ -1,4 +1,4 @@
-# Sınav Sistemi - Güvenli Çevrimiçi Sınav Platformu
+# Sınav Sistemi - Güvenli Çevrimdışı Sınav Platformu
 
 Bu proje, güvenli ve güvenilir çevrimiçi sınav yönetimi için geliştirilmiş bir masaüstü uygulamasıdır.
 
