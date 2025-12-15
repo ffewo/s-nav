@@ -432,7 +432,7 @@ class SinavClientGUI:
     def show_upload_progress(self, filename):
         """Yükleme sırasında gösterilecek progress bar penceresi"""
         # Eğer zaten açıksa, sadece resetle
-        if self.upload_progress_window and tk.Toplevel.winfo_exists(self.upload_progress_window):
+        if self.upload_progress_window and self.upload_progress_window.winfo_exists():
             self.upload_progress_var.set(0)
             if self.upload_progress_label:
                 self.upload_progress_label.config(text=f"{filename} yükleniyor... %0")
@@ -454,7 +454,7 @@ class SinavClientGUI:
 
     def update_upload_progress(self, percent, filename=None):
         """Progress bar yüzdesini güncelle"""
-        if not (self.upload_progress_window and tk.Toplevel.winfo_exists(self.upload_progress_window)):
+        if not (self.upload_progress_window and self.upload_progress_window.winfo_exists()):
             return
         self.upload_progress_var.set(percent)
         if self.upload_progress_label:
@@ -465,7 +465,7 @@ class SinavClientGUI:
 
     def close_upload_progress(self):
         """Yükleme bittiğinde progress penceresini kapat"""
-        if self.upload_progress_window and tk.Toplevel.winfo_exists(self.upload_progress_window):
+        if self.upload_progress_window and self.upload_progress_window.winfo_exists():
             try:
                 self.upload_progress_window.destroy()
             except Exception:
@@ -484,9 +484,6 @@ class SinavClientGUI:
             filesize = os.path.getsize(filepath)
             logging.info(f"Dosya yükleniyor: {filename} ({filesize} bytes)")
 
-            # Progress penceresini aç
-            self.root.after(0, lambda: self.show_upload_progress(filename))
-            
             # Yükleme komutunu gönder
             upload_cmd = f"STOR {filename} {filesize}"
             self.control_socket.send(upload_cmd.encode(FORMAT))
@@ -505,6 +502,9 @@ class SinavClientGUI:
                 self.root.after(0, lambda: messagebox.showerror("Hata", 
                                                                f"Sunucu yüklemeyi reddetti: {resp}"))
                 return
+
+            # Sunucu yüklemeye hazırsa progress penceresini aç
+            self.root.after(0, lambda: self.show_upload_progress(filename))
 
             # Dosyayı gönder
             bytes_sent = 0
@@ -532,9 +532,8 @@ class SinavClientGUI:
                 logging.warning("Yükleme onayı zaman aşımı")
             
             logging.info(f"Dosya başarıyla yüklendi: {filename}")
-            # Progressi %100'e çek ve pencereyi kapat
+            # Progressi %100'e çek
             self.root.after(0, lambda: self.update_upload_progress(100, filename))
-            self.root.after(500, self.close_upload_progress)
             self.root.after(0, self.finish_exam_shutdown)
             
         except socket.timeout:
