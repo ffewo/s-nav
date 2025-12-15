@@ -4,6 +4,7 @@ import os
 import time
 import tkinter as tk
 from tkinter import messagebox, filedialog
+from tkinter import ttk
 import psutil
 import sys
 import logging
@@ -65,6 +66,10 @@ class SinavClientGUI:
         self.exam_started = False
         self.reconnect_attempts = 0
         self.last_heartbeat = time.time()
+        # Upload progress UI state
+        self.upload_progress_window = None
+        self.upload_progress_var = tk.DoubleVar(value=0.0)
+        self.upload_progress_label = None
         
         logging.info("Sınav sistemi başlatıldı")
         self.setup_login_ui()
@@ -423,6 +428,52 @@ class SinavClientGUI:
         filename = os.path.basename(filepath)
         threading.Thread(target=self._upload_thread, args=(filepath, filename), daemon=True).start()
 
+    # --- Upload Progress UI Helpers ---
+    def show_upload_progress(self, filename):
+        """Yükleme sırasında gösterilecek progress bar penceresi"""
+        # Eğer zaten açıksa, sadece resetle
+        if self.upload_progress_window and tk.Toplevel.winfo_exists(self.upload_progress_window):
+            self.upload_progress_var.set(0)
+            if self.upload_progress_label:
+                self.upload_progress_label.config(text=f"{filename} yükleniyor... %0")
+            return
+
+        self.upload_progress_window = tk.Toplevel(self.root)
+        self.upload_progress_window.title("Yükleniyor")
+        self.upload_progress_window.geometry("350x120")
+        self.upload_progress_window.resizable(False, False)
+        self.upload_progress_window.grab_set()  # Odak al
+
+        tk.Label(self.upload_progress_window, text="Dosya yükleniyor, lütfen bekleyin...", font=("Arial", 10)).pack(pady=5)
+        self.upload_progress_label = tk.Label(self.upload_progress_window, text=f"{filename} yükleniyor... %0")
+        self.upload_progress_label.pack(pady=5)
+
+        pb = ttk.Progressbar(self.upload_progress_window, orient="horizontal", length=300,
+                             mode="determinate", maximum=100, variable=self.upload_progress_var)
+        pb.pack(pady=5)
+
+    def update_upload_progress(self, percent, filename=None):
+        """Progress bar yüzdesini güncelle"""
+        if not (self.upload_progress_window and tk.Toplevel.winfo_exists(self.upload_progress_window)):
+            return
+        self.upload_progress_var.set(percent)
+        if self.upload_progress_label:
+            if filename:
+                self.upload_progress_label.config(text=f"{filename} yükleniyor... %{percent:.1f}")
+            else:
+                self.upload_progress_label.config(text=f"Yükleniyor... %{percent:.1f}")
+
+    def close_upload_progress(self):
+        """Yükleme bittiğinde progress penceresini kapat"""
+        if self.upload_progress_window and tk.Toplevel.winfo_exists(self.upload_progress_window):
+            try:
+                self.upload_progress_window.destroy()
+            except Exception:
+                pass
+        self.upload_progress_window = None
+        self.upload_progress_label = None
+        self.upload_progress_var.set(0)
+
     def _upload_thread(self, filepath, filename):
         """Dosya yükleme thread'i"""
         if not self.is_connected:
@@ -432,6 +483,9 @@ class SinavClientGUI:
         try:
             filesize = os.path.getsize(filepath)
             logging.info(f"Dosya yükleniyor: {filename} ({filesize} bytes)")
+
+            # Progress penceresini aç
+            self.root.after(0, lambda: self.show_upload_progress(filename))
             
             # Yükleme komutunu gönder
             upload_cmd = f"STOR {filename} {filesize}"
@@ -462,10 +516,12 @@ class SinavClientGUI:
                     self.control_socket.sendall(chunk)
                     bytes_sent += len(chunk)
                     
-                    # İlerleme göstergesi (opsiyonel)
-                    progress = (bytes_sent / filesize) * 100
-                    if bytes_sent % (BUFFER_SIZE * 10) == 0:  # Her 40KB'da bir log
+                    # İlerleme göstergesi (log + progress bar)
+                    progress = (bytes_sent / filesize) * 100 if filesize > 0 else 100
+                    if bytes_sent % (BUFFER_SIZE * 10) == 0 or bytes_sent == filesize:
                         logging.info(f"Yükleme ilerlemesi: %{progress:.1f}")
+                        # GUI güncellemesini ana thread'de sadece belirli aralıklarda yap
+                        self.root.after(0, lambda p=progress, fn=filename: self.update_upload_progress(p, fn))
             
             # Tamamlanma onayını bekle
             self.control_socket.settimeout(5.0)
@@ -476,6 +532,9 @@ class SinavClientGUI:
                 logging.warning("Yükleme onayı zaman aşımı")
             
             logging.info(f"Dosya başarıyla yüklendi: {filename}")
+            # Progressi %100'e çek ve pencereyi kapat
+            self.root.after(0, lambda: self.update_upload_progress(100, filename))
+            self.root.after(500, self.close_upload_progress)
             self.root.after(0, self.finish_exam_shutdown)
             
         except socket.timeout:
@@ -487,6 +546,9 @@ class SinavClientGUI:
             self.root.after(0, lambda: messagebox.showerror("Yükleme Hatası", 
                                                            f"Dosya yüklenemedi!\n\nHata: {str(e)}"))
             self.handle_connection_lost()
+        finally:
+            # Hata durumunda da progress penceresini kapat
+            self.root.after(0, self.close_upload_progress)
 
     def finish_exam_shutdown(self):
         messagebox.showinfo("Başarılı", "Sınav dosyanız gönderildi. Sistem kapatılıyor.")
