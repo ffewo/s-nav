@@ -186,20 +186,38 @@ class TeacherServerGUI:
         tree_frame = tk.Frame(list_frame)
         tree_frame.pack(fill=tk.BOTH, expand=True)
         
-        self.tree = ttk.Treeview(tree_frame, columns=("No", "Ad", "IP", "Durum", "Bağlantı", "Son İşlem"), show='headings')
+        # Kolonlar: Öğrenci No, Ad, IP, Durum, Bağlantı Zamanı, Son Aktivite, Teslim Dosyası, Teslim Zamanı
+        self.tree = ttk.Treeview(
+            tree_frame,
+            columns=(
+                "No",
+                "Ad",
+                "IP",
+                "Durum",
+                "Bağlantı",
+                "Son İşlem",
+                "Teslim Dosyası",
+                "Teslim Zamanı"
+            ),
+            show='headings'
+        )
         self.tree.heading("No", text="Öğrenci No")
         self.tree.heading("Ad", text="Ad Soyad")
         self.tree.heading("IP", text="IP Adresi")
         self.tree.heading("Durum", text="Durum")
         self.tree.heading("Bağlantı", text="Bağlantı Zamanı")
         self.tree.heading("Son İşlem", text="Son Aktivite")
+        self.tree.heading("Teslim Dosyası", text="Teslim Dosyası")
+        self.tree.heading("Teslim Zamanı", text="Teslim Zamanı")
         
         self.tree.column("No", width=80)
-        self.tree.column("Ad", width=120)
-        self.tree.column("IP", width=100)
-        self.tree.column("Durum", width=80)
+        self.tree.column("Ad", width=140)
+        self.tree.column("IP", width=110)
+        self.tree.column("Durum", width=90)
         self.tree.column("Bağlantı", width=120)
-        self.tree.column("Son İşlem", width=200)
+        self.tree.column("Son İşlem", width=220)
+        self.tree.column("Teslim Dosyası", width=160)
+        self.tree.column("Teslim Zamanı", width=110)
         
         # Scrollbar
         scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
@@ -257,6 +275,11 @@ class TeacherServerGUI:
         # İstatistikleri hazırla
         total_students = len(load_students())
         connected_count = len(connected_students)
+
+        
+        
+        # Başlangıç zamanını gösterilebilir formata çevir
+        start_time_display = self.start_time if self.start_time else "Henüz başlamadı"
         
         stats_content = f"""📊 SINAV SİSTEMİ İSTATİSTİKLERİ
 {'='*50}
@@ -269,7 +292,7 @@ class TeacherServerGUI:
 ⏰ Sınav Durumu:
 • Sınav durumu: {'BAŞLADI' if self.exam_started else 'BAŞLAMADI'}
 • Kalan süre: {self.exam_time_remaining//60:02d}:{self.exam_time_remaining%60:02d}
-• Başlangıç zamanı: {self.start_time or 'Henüz başlamadı'}
+• Başlangıç zamanı: {start_time_display}
 
 📁 Dosya Durumu:
 • Soru dosyası sayısı: {len(os.listdir('Sorular')) if os.path.exists('Sorular') else 0}
@@ -369,7 +392,9 @@ class TeacherServerGUI:
                                 "addr": addr, 
                                 "name": student_name,
                                 "login_time": connection_time,
-                                "last_activity": datetime.now()
+                                "last_activity": datetime.now(),
+                                "delivery_file": "",
+                                "delivery_time": ""
                             }
                             conn.send("230 Giris Basarili\n".encode(FORMAT))
                             
@@ -400,8 +425,14 @@ class TeacherServerGUI:
                             files_str = ",".join(files) if files else ""
                             conn.send(f"DATA_LIST:{files_str}\n".encode(FORMAT))
                             
-                            self.update_ui_list(student_no, student_name, addr[0], "Aktif", connection_time, 
-                                              f"Sorular listelendi ({len(files)} dosya)")
+                            self.update_ui_list(
+                                student_no,
+                                student_name,
+                                addr[0],
+                                "Aktif",
+                                connection_time,
+                                f"Sorular listelendi ({len(files)} dosya)"
+                            )
                             
                             # Aktiviteyi güncelle
                             if student_no in connected_students:
@@ -438,8 +469,23 @@ class TeacherServerGUI:
                                 
                             conn.send("READY_TO_UPLOAD\n".encode(FORMAT))
                             
-                            self.update_ui_list(student_no, student_name, addr[0], "Yüklüyor", connection_time, 
-                                              f"{filename} yükleniyor... ({filesize} bytes)")
+                            # Yükleme başladığında mevcut teslim bilgilerini koru
+                            current_delivery_file = ""
+                            current_delivery_time = ""
+                            if student_no in connected_students:
+                                current_delivery_file = connected_students[student_no].get("delivery_file", "")
+                                current_delivery_time = connected_students[student_no].get("delivery_time", "")
+                            
+                            self.update_ui_list(
+                                student_no,
+                                student_name,
+                                addr[0],
+                                "Yüklüyor",
+                                connection_time,
+                                f"{filename} yükleniyor... ({filesize} bytes)",
+                                current_delivery_file,
+                                current_delivery_time
+                            )
                             
                             # Dosyayı al
                             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -459,8 +505,23 @@ class TeacherServerGUI:
                             
                             if received == filesize:
                                 conn.send("226 Transfer tamamlandi\n".encode(FORMAT))
-                                self.update_ui_list(student_no, student_name, addr[0], "TESLİM EDİLDİ", connection_time, 
-                                                  f"CEVAP TESLİM EDİLDİ: {filename}")
+                                
+                                # Teslim bilgilerini güncelle
+                                delivery_time = datetime.now().strftime("%H:%M:%S")
+                                if student_no in connected_students:
+                                    connected_students[student_no]["delivery_file"] = filename
+                                    connected_students[student_no]["delivery_time"] = delivery_time
+                                
+                                self.update_ui_list(
+                                    student_no,
+                                    student_name,
+                                    addr[0],
+                                    "TESLİM EDİLDİ",
+                                    connection_time,
+                                    f"CEVAP TESLİM EDİLDİ: {filename}",
+                                    filename,
+                                    delivery_time
+                                )
                                 logging.info(f"Dosya başarıyla alındı: {student_no} - {safe_filename}")
                                 
                                 # Aktiviteyi kaydet
@@ -508,8 +569,20 @@ class TeacherServerGUI:
                 pass
                 
             if student_no != "Bilinmiyor" and student_no in connected_students:
+                # Son teslim bilgilerini al
+                delivery_file = connected_students[student_no].get("delivery_file", "")
+                delivery_time = connected_students[student_no].get("delivery_time", "")
                 del connected_students[student_no]
-                self.update_ui_list(student_no, student_name, addr[0], "Çevrimdışı", connection_time, "Bağlantı Koptu")
+                self.update_ui_list(
+                    student_no,
+                    student_name,
+                    addr[0],
+                    "Çevrimdışı",
+                    connection_time,
+                    "Bağlantı Koptu",
+                    delivery_file,
+                    delivery_time
+                )
                 logging.info(f"Bağlantı kapatıldı: {student_no} ({addr[0]})")
 
     def start_exam_timer(self):
@@ -517,8 +590,10 @@ class TeacherServerGUI:
         if mins:
             self.exam_started = True
             self.exam_time_remaining = mins * 60
+            # Sınav başlangıç zamanını kaydet
+            self.start_time = datetime.now().strftime("%H:%M:%S")
             self.timer_running = True
-            self.status_lbl.config(text="Durum: SINAV BAŞLADI (Yüklemeler Açık)", fg="red")
+            self.status_lbl.config(text="Durum: SINAV BAŞLADI", fg="red")
             
             total_seconds = mins * 60
             for s_no, data in connected_students.items():
@@ -563,11 +638,23 @@ class TeacherServerGUI:
                 try: data["conn"].send(f"CMD:MSG:{msg}\n".encode(FORMAT))
                 except: pass
 
-    def update_ui_list(self, no, name, ip, status, connection_time, action):
+    def update_ui_list(self, no, name, ip, status, connection_time, action, delivery_file=None, delivery_time=None):
         """UI listesini güncelle"""
-        self.root.after(0, lambda: self._update_tree_safe(no, name, ip, status, connection_time, action))
-
-    def _update_tree_safe(self, no, name, ip, status, connection_time, action):
+        self.root.after(
+            0,
+            lambda: self._update_tree_safe(
+                no,
+                name,
+                ip,
+                status,
+                connection_time,
+                action,
+                delivery_file,
+                delivery_time,
+            ),
+        )
+    
+    def _update_tree_safe(self, no, name, ip, status, connection_time, action, delivery_file=None, delivery_time=None):
         """Thread-safe UI güncellemesi"""
         str_no = str(no).strip()
         found_item = None
@@ -579,16 +666,47 @@ class TeacherServerGUI:
                 found_item = item
                 break
         
+        # Mevcut teslim bilgilerini doldur (gönderilmemişse)
+        if delivery_file is None and str_no in connected_students:
+            delivery_file = connected_students[str_no].get("delivery_file", "")
+        if delivery_time is None and str_no in connected_students:
+            delivery_time = connected_students[str_no].get("delivery_time", "")
+        
         # Zaman damgası ekle
         timestamp = datetime.now().strftime("%H:%M:%S")
         action_with_time = f"[{timestamp}] {action}"
         
         if found_item:
             # Mevcut kaydı güncelle
-            self.tree.item(found_item, values=(str_no, name, ip, status, connection_time, action_with_time))
+            self.tree.item(
+                found_item,
+                values=(
+                    str_no,
+                    name,
+                    ip,
+                    status,
+                    connection_time,
+                    action_with_time,
+                    delivery_file or "",
+                    delivery_time or "",
+                ),
+            )
         else:
             # Yeni kayıt ekle
-            self.tree.insert("", "end", values=(str_no, name, ip, status, connection_time, action_with_time))
+            self.tree.insert(
+                "",
+                "end",
+                values=(
+                    str_no,
+                    name,
+                    ip,
+                    status,
+                    connection_time,
+                    action_with_time,
+                    delivery_file or "",
+                    delivery_time or "",
+                ),
+            )
 
 if __name__ == "__main__":
     root = tk.Tk()

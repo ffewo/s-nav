@@ -11,6 +11,10 @@ import logging
 import json
 from datetime import datetime
 from config_manager import get_config
+try:
+    import winsound
+except ImportError:
+    winsound = None
 
 # Konfigürasyonu yükle
 config = get_config()
@@ -57,7 +61,7 @@ class SinavClientGUI:
         self.app_running = True
         # Config'den yasaklı uygulamaları al
         self.banned_apps = config.get("security.banned_applications", 
-                                     ["chrome.exe", "firefox.exe", "msedge.exe", "opera.exe"])
+                                     ["chrome.exe", "firefox.exe", "msedge.exe", "opera.exe", "brave.exe","firefox.exe"])
         threading.Thread(target=self.browser_killer, daemon=True).start()
 
         self.control_socket = None
@@ -70,6 +74,8 @@ class SinavClientGUI:
         self.upload_progress_window = None
         self.upload_progress_var = tk.DoubleVar(value=0.0)
         self.upload_progress_label = None
+        # Sınav süresi uyarıları için state
+        self.one_minute_warned = False
         
         logging.info("Sınav sistemi başlatıldı")
         self.setup_login_ui()
@@ -279,15 +285,35 @@ class SinavClientGUI:
             color = "red" if seconds <= 300 else "orange" if seconds <= 600 else "green"
             self.timer_label.config(text=f"Süre: {mins:02}:{secs:02}", fg=color)
             
+            # Sınavın bitmesine 1 dakika kala popup + ses uyarısı (her sınavda sadece 1 kez)
+            if seconds == 60 and not self.one_minute_warned:
+                self.one_minute_warned = True
+                self.root.after(0, self.show_one_minute_warning)
+            
             if self.app_running:
-                 self.root.after(1000, lambda: self.start_countdown(seconds - 1))
+                self.root.after(1000, lambda: self.start_countdown(seconds - 1))
         else:
             self.time_up_shutdown()
+
+    def show_one_minute_warning(self):
+        """Sınav bitimine 1 dakika kala uyarı ve ses"""
+        try:
+            if winsound:
+                # Basit uyarı sesi (Windows'ta çalışır)
+                winsound.Beep(1000, 700)
+        except Exception as e:
+            logging.error(f"Ses çalma hatası: {e}")
+        try:
+            messagebox.showwarning("Süre Uyarısı", "Sınavın bitmesine 1 dakika kaldı!")
+        except Exception as e:
+            logging.error(f"Uyarı penceresi gösterilemedi: {e}")
 
     def activate_exam_mode(self):
         """Sınav modunu aktif et - buton ve durumu güncelle"""
         if not self.exam_started:
             self.exam_started = True
+            # Yeni sınav başlarken 1 dakika uyarı durumunu sıfırla
+            self.one_minute_warned = False
             try:
                 self.upload_btn.config(state="normal", bg="#FF5722", text="DOSYA YÜKLE / TESLİM ET")
             except Exception as e:
@@ -493,14 +519,27 @@ class SinavClientGUI:
             resp = self.control_socket.recv(BUFFER_SIZE).decode(FORMAT).strip()
             logging.info(f"Yükleme yanıtı: {resp}")
             
-            if "550" in resp:
-                self.root.after(0, lambda: messagebox.showerror("Yükleme Yasak", 
-                                                               "Sınav başlamadığı için dosya yükleyemezsiniz!"))
+            # Sunucu hatalarını doğru mesajla göster
+            if resp.startswith("550"):
+                error_msg = resp
+                # Spesifik hata kodlarına göre daha anlaşılır mesajlar
+                if "SINAV_BASLAMADI" in resp:
+                    error_msg = "Sınav başlamadığı için dosya yükleyemezsiniz!"
+                elif "Dosya cok buyuk" in resp:
+                    error_msg = f"Dosya çok büyük. Sunucu yanıtı: {resp}"
+                elif "Transfer yarim kaldi" in resp:
+                    error_msg = "Dosya transferi yarım kaldı. Lütfen tekrar deneyin."
+                elif "Gecersiz dosya boyutu" in resp:
+                    error_msg = "Geçersiz dosya boyutu. Lütfen dosyayı kontrol edin."
+                elif "Yukleme hatasi" in resp:
+                    error_msg = "Sunucuda yükleme hatası oluştu. Lütfen tekrar deneyin."
+                
+                self.root.after(0, lambda m=error_msg: messagebox.showerror("Yükleme Hatası", m))
                 return
             
             if "READY" not in resp:
-                self.root.after(0, lambda: messagebox.showerror("Hata", 
-                                                               f"Sunucu yüklemeyi reddetti: {resp}"))
+                self.root.after(0, lambda r=resp: messagebox.showerror("Yükleme Hatası", 
+                                                                       f"Sunucu yüklemeyi reddetti: {r}"))
                 return
 
             # Sunucu yüklemeye hazırsa progress penceresini aç
