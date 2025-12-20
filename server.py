@@ -7,6 +7,7 @@ import logging
 import time
 from datetime import datetime
 import json
+import random
 from config_manager import get_config
 from file_manager import get_secure_file_handler, get_question_file_manager
 
@@ -16,6 +17,8 @@ config = get_config()
 # --- AYARLAR ---
 HOST_IP = config.get("server.host", "0.0.0.0")
 CONTROL_PORT = config.get("server.port", 2121)
+DATA_PORT_MIN = config.get("server.data_port_min", 49152)  # Ephemeral port aralığı başlangıcı
+DATA_PORT_MAX = config.get("server.data_port_max", 65535)  # Ephemeral port aralığı sonu
 BUFFER_SIZE = config.get("server.buffer_size", 4096)
 FORMAT = "utf-8"
 MAX_CONNECTIONS = config.get("server.max_connections", 50)
@@ -62,12 +65,9 @@ def load_students():
                         logging.warning(f"Eksik veri satır {line_count}: {line}")
         logging.info(f"{len(students)} öğrenci yüklendi")
     except FileNotFoundError:
-        logging.warning("students.txt bulunamadı, varsayılan öğrenciler oluşturuluyor")
+        logging.warning("students.txt bulunamadı,")
         # Varsayılan öğrenci oluştur
-        students = {
-            "415576": {"password": "123456", "name": "Furkan Barış"},
-            "123456": {"password": "password", "name": "Test Öğrenci"}
-        }
+
         # Varsayılan dosyayı oluştur
         try:
             with open("students.txt", "w", encoding="utf-8") as f:
@@ -237,16 +237,18 @@ class TeacherServerGUI:
     def start_server(self):
         """Sunucuyu başlat"""
         try:
+            # Control port (komutlar için)
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.server_socket.bind((HOST_IP, CONTROL_PORT))
             self.server_socket.listen(MAX_CONNECTIONS)
             
-            logging.info(f"Sunucu başlatıldı: {HOST_IP}:{CONTROL_PORT}")
+            logging.info(f"Sunucu başlatıldı: {HOST_IP}:{CONTROL_PORT} (Control), Data port: {DATA_PORT_MIN}-{DATA_PORT_MAX} (dinamik)")
             messagebox.showinfo("Sunucu Başlatıldı", 
                               f"Sınav sunucusu başarıyla başlatıldı!\n\n"
                               f"IP: {HOST_IP}\n"
-                              f"Port: {CONTROL_PORT}\n"
+                              f"Control Port: {CONTROL_PORT}\n"
+                              f"Data Port: {DATA_PORT_MIN}-{DATA_PORT_MAX} (rastgele)\n"
                               f"Maksimum bağlantı: {MAX_CONNECTIONS}")
             
             threading.Thread(target=self.accept_clients, daemon=True).start()
@@ -470,8 +472,114 @@ class TeacherServerGUI:
                             if filesize > max_size_mb * 1024 * 1024:
                                 conn.send(f"550 Dosya cok buyuk (max {max_size_mb}MB)\n".encode(FORMAT))
                                 continue
+                            
+                            # Rastgele data port seç ve socket oluştur
+                            data_server_socket = None
+                            data_port = None
+                            max_attempts = 10  # Port seçimi için maksimum deneme
+                            
+                            for attempt in range(max_attempts):
+                                try:
+                                    # Rastgele port seç (49152-65535)
+                                    data_port = random.randint(DATA_PORT_MIN, DATA_PORT_MAX)
+                                    
+                                    # Yeni socket oluştur
+                                    data_server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                                    data_server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                                    data_server_socket.bind((HOST_IP, data_port))
+                                    data_server_socket.listen(1)  # Sadece 1 bağlantı bekliyoruz
+                                    data_server_socket.settimeout(30)  # 30 saniye timeout
+                                    
+                                    logging.info(f"Rastgele data port açıldı: {data_port} (öğrenci: {student_no})")
+                                    break  # Başarılı, döngüden çık
+                                    
+                                except OSError as e:
+                                    # Port kullanımda, tekrar dene
+                                    if data_server_socket:
+                                        try:
+                                            data_server_socket.close()
+                                        except:
+                                            pass
+                                    if attempt == max_attempts - 1:
+                                        conn.send("550 Data port acilamadi\n".encode(FORMAT))
+                                        logging.error(f"Data port açılamadı: {e}")
+                                        continue
+                            
+                            if data_server_socket is None or data_port is None:
+                                conn.send("550 Data port acilamadi\n".encode(FORMAT))
+                                logging.error(f"Data port açılamadı (öğrenci: {student_no})")
+                                continue
+                            
+                            # HOST_IP "0.0.0.0" ise server socket'inin gerçek IP'sini kullan
+                            server_ip_for_client = HOST_IP
+                            if HOST_IP == "0.0.0.0":
+                                # Server socket'inin gerçek IP'sini al
+                                try:
+                                    # Control socket'inin kendi IP'sini al
+                                    server_ip_for_client = self.server_socket.getsockname()[0]
+                                    # Eğer hala "0.0.0.0" ise, client'ın bağlandığı IP'yi kullan
+                                    if server_ip_for_client == "0.0.0.0":
+                                        server_ip_for_client = addr[0]
+                                except:
+                                    # Hata durumunda client'ın bağlandığı IP'yi kullan
+                                    server_ip_for_client = addr[0]
+                            
+                            # Data port bilgisini gönder (PASV benzeri)
+                            data_port_msg = f"227 Entering Passive Mode ({server_ip_for_client.replace('.', ',')},{data_port//256},{data_port%256})\n"
+                            conn.send(data_port_msg.encode(FORMAT))
+                            logging.info(f"Data port bilgisi gönderildi: {data_port} (IP: {server_ip_for_client}, öğrenci: {student_no})")
+                            
+                            # Kısa bir bekleme - client'ın bağlanması için zaman tanı
+                            time.sleep(0.2)  # 200ms bekleme (client'ın bağlanması için)
+                            
+                            # Data port'tan bağlantıyı bekle
+                            data_conn = None
+                            try:
+                                logging.info(f"Data bağlantısı bekleniyor: {data_port} (öğrenci: {student_no})")
+                                data_conn, data_addr = data_server_socket.accept()
+                                logging.info(f"Data bağlantısı kuruldu: {data_addr[0]}:{data_addr[1]}")
                                 
-                            conn.send("READY_TO_UPLOAD\n".encode(FORMAT))
+                                # READY mesajını hemen gönder (data bağlantısı kurulduktan sonra)
+                                # TCP_NODELAY ayarını önce yap (mesajın hemen gönderilmesi için)
+                                try:
+                                    conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                                except:
+                                    pass
+                                
+                                try:
+                                    ready_msg = "READY\n"
+                                    conn.send(ready_msg.encode(FORMAT))
+                                    # Mesajın gönderildiğinden emin olmak için kısa bir bekleme
+                                    time.sleep(0.05)  # 50ms bekleme
+                                    logging.info(f"READY mesajı gönderildi (öğrenci: {student_no}, port: {data_port}, dosya: {filename})")
+                                except Exception as ready_error:
+                                    logging.error(f"READY mesajı gönderilemedi: {ready_error} (öğrenci: {student_no})")
+                                    try:
+                                        data_conn.close()
+                                    except:
+                                        pass
+                                    try:
+                                        data_server_socket.close()
+                                    except:
+                                        pass
+                                    continue
+                                    
+                            except socket.timeout:
+                                conn.send("550 Data baglantisi zaman asimina ugradi\n".encode(FORMAT))
+                                logging.error(f"Data bağlantısı zaman aşımı: {student_no} (port: {data_port})")
+                                try:
+                                    data_server_socket.close()
+                                except:
+                                    pass
+                                continue
+                            except Exception as e:
+                                conn.send("550 Data baglantisi kurulamadi\n".encode(FORMAT))
+                                logging.error(f"Data bağlantısı hatası: {e} (port: {data_port}, öğrenci: {student_no})")
+                                try:
+                                    data_server_socket.close()
+                                except:
+                                    pass
+                                continue
                             
                             # Yükleme başladığında mevcut teslim bilgilerini koru
                             current_delivery_file = ""
@@ -494,17 +602,32 @@ class TeacherServerGUI:
                             # Use SecureFileHandler to receive and save file
                             secure_handler = get_secure_file_handler()
                             
-                            # Receive file data
+                            # Receive file data from data port
                             received = 0
                             file_data_chunks = []
+                            data_conn.settimeout(300)  # 5 dakika timeout
                             while received < filesize:
                                 remaining = filesize - received
                                 chunk_size = min(BUFFER_SIZE, remaining)
-                                chunk = conn.recv(chunk_size)
-                                if not chunk: 
+                                try:
+                                    chunk = data_conn.recv(chunk_size)
+                                    if not chunk: 
+                                        break
+                                    file_data_chunks.append(chunk)
+                                    received += len(chunk)
+                                except socket.timeout:
+                                    logging.warning(f"Dosya yükleme zaman aşımı: {received}/{filesize} bytes")
                                     break
-                                file_data_chunks.append(chunk)
-                                received += len(chunk)
+                            
+                            # Data bağlantısını ve socket'i kapat
+                            try:
+                                data_conn.close()
+                            except:
+                                pass
+                            try:
+                                data_server_socket.close()
+                            except:
+                                pass
                             
                             if received == filesize:
                                 # Combine all chunks
@@ -591,10 +714,113 @@ class TeacherServerGUI:
                             # Dosya boyutunu al
                             filesize = len(file_data)
                             
-                            # İndirmeye hazır olduğunu bildir
-                            ready_msg = f"READY {filesize}\n".encode(FORMAT)
-                            conn.send(ready_msg)
-                            logging.info(f"READY mesajı gönderildi: {filename} ({filesize} bytes)")
+                            # Rastgele data port seç ve socket oluştur
+                            data_server_socket = None
+                            data_port = None
+                            max_attempts = 10  # Port seçimi için maksimum deneme
+                            
+                            for attempt in range(max_attempts):
+                                try:
+                                    # Rastgele port seç (49152-65535)
+                                    data_port = random.randint(DATA_PORT_MIN, DATA_PORT_MAX)
+                                    
+                                    # Yeni socket oluştur
+                                    data_server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                                    data_server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                                    data_server_socket.bind((HOST_IP, data_port))
+                                    data_server_socket.listen(1)  # Sadece 1 bağlantı bekliyoruz
+                                    data_server_socket.settimeout(30)  # 30 saniye timeout
+                                    
+                                    logging.info(f"Rastgele data port açıldı: {data_port} (öğrenci: {student_no})")
+                                    break  # Başarılı, döngüden çık
+                                    
+                                except OSError as e:
+                                    # Port kullanımda, tekrar dene
+                                    if data_server_socket:
+                                        try:
+                                            data_server_socket.close()
+                                        except:
+                                            pass
+                                    if attempt == max_attempts - 1:
+                                        conn.send("550 Data port acilamadi\n".encode(FORMAT))
+                                        logging.error(f"Data port açılamadı: {e}")
+                                        continue
+                            
+                            if data_server_socket is None or data_port is None:
+                                conn.send("550 Data port acilamadi\n".encode(FORMAT))
+                                logging.error(f"Data port açılamadı (öğrenci: {student_no})")
+                                continue
+                            
+                            # HOST_IP "0.0.0.0" ise server socket'inin gerçek IP'sini kullan
+                            server_ip_for_client = HOST_IP
+                            if HOST_IP == "0.0.0.0":
+                                # Server socket'inin gerçek IP'sini al
+                                try:
+                                    # Control socket'inin kendi IP'sini al
+                                    server_ip_for_client = self.server_socket.getsockname()[0]
+                                    # Eğer hala "0.0.0.0" ise, client'ın bağlandığı IP'yi kullan
+                                    if server_ip_for_client == "0.0.0.0":
+                                        server_ip_for_client = addr[0]
+                                except:
+                                    # Hata durumunda client'ın bağlandığı IP'yi kullan
+                                    server_ip_for_client = addr[0]
+                            
+                            # Data port bilgisini gönder (PASV benzeri)
+                            data_port_msg = f"227 Entering Passive Mode ({server_ip_for_client.replace('.', ',')},{data_port//256},{data_port%256})\n"
+                            conn.send(data_port_msg.encode(FORMAT))
+                            logging.info(f"Data port bilgisi gönderildi: {data_port} (IP: {server_ip_for_client}, öğrenci: {student_no})")
+                            
+                            # Kısa bir bekleme - client'ın bağlanması için zaman tanı
+                            time.sleep(0.2)  # 200ms bekleme (client'ın bağlanması için)
+                            
+                            # Data port'tan bağlantıyı bekle
+                            data_conn = None
+                            try:
+                                logging.info(f"Data bağlantısı bekleniyor: {data_port} (öğrenci: {student_no})")
+                                data_conn, data_addr = data_server_socket.accept()
+                                logging.info(f"Data bağlantısı kuruldu: {data_addr[0]}:{data_addr[1]}")
+                                
+                                # READY mesajını hemen gönder (data bağlantısı kurulduktan sonra)
+                                # TCP_NODELAY ayarını önce yap (mesajın hemen gönderilmesi için)
+                                try:
+                                    conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                                except:
+                                    pass
+                                
+                                try:
+                                    ready_msg = f"READY {filesize}\n"
+                                    conn.send(ready_msg.encode(FORMAT))
+                                    # Mesajın gönderildiğinden emin olmak için kısa bir bekleme
+                                    time.sleep(0.05)  # 50ms bekleme
+                                    logging.info(f"READY mesajı gönderildi: {filename} ({filesize} bytes, port: {data_port}, öğrenci: {student_no})")
+                                except Exception as ready_error:
+                                    logging.error(f"READY mesajı gönderilemedi: {ready_error} (öğrenci: {student_no})")
+                                    try:
+                                        data_conn.close()
+                                    except:
+                                        pass
+                                    try:
+                                        data_server_socket.close()
+                                    except:
+                                        pass
+                                    continue
+                                    
+                            except socket.timeout:
+                                conn.send("550 Data baglantisi zaman asimina ugradi\n".encode(FORMAT))
+                                logging.error(f"Data bağlantısı zaman aşımı: {student_no} (port: {data_port})")
+                                try:
+                                    data_server_socket.close()
+                                except:
+                                    pass
+                                continue
+                            except Exception as e:
+                                conn.send("550 Data baglantisi kurulamadi\n".encode(FORMAT))
+                                logging.error(f"Data bağlantısı hatası: {e} (port: {data_port}, öğrenci: {student_no})")
+                                try:
+                                    data_server_socket.close()
+                                except:
+                                    pass
+                                continue
                             
                             # Aktiviteyi güncelle
                             if student_no in connected_students:
@@ -609,57 +835,70 @@ class TeacherServerGUI:
                                 f"{filename} indiriliyor... ({filesize} bytes)"
                             )
                             
-                            # Çok kısa bir bekleme - istemcinin READY mesajını işlemesi için
-                            # Ama çok uzun olmamalı, yoksa istemci timeout olabilir
-                            time.sleep(0.05)  # 50ms yeterli
-                            
-                            # Dosyayı gönder
+                            # Dosyayı data port üzerinden gönder
                             sent = 0
                             try:
+                                data_conn.settimeout(300)  # 5 dakika timeout
                                 while sent < filesize:
                                     remaining = filesize - sent
                                     chunk_size = min(BUFFER_SIZE, remaining)
                                     chunk = file_data[sent:sent + chunk_size]
                                     if not chunk:
                                         break
-                                    conn.sendall(chunk)
+                                    data_conn.sendall(chunk)
                                     sent += len(chunk)
                                     
                                     # Büyük dosyalar için ilerleme logla
                                     if filesize > 1024 * 1024 and sent % (1024 * 1024) == 0:  # Her MB'da bir
                                         logging.info(f"Dosya gönderiliyor: {sent}/{filesize} bytes ({sent*100//filesize}%)")
                                 
+                                # Data bağlantısını ve socket'i kapat
+                                try:
+                                    data_conn.close()
+                                except:
+                                    pass
+                                try:
+                                    data_server_socket.close()
+                                except:
+                                    pass
+                                
                                 if sent == filesize:
                                     # Transfer tamamlandı mesajını gönder
                                     conn.send("226 Transfer tamamlandi\n".encode(FORMAT))
                                     logging.info(f"Dosya başarıyla gönderildi: {student_no} - {filename} ({filesize} bytes)")
+                                    
+                                    self.update_ui_list(
+                                        student_no,
+                                        student_name,
+                                        addr[0],
+                                        "Aktif",
+                                        connection_time,
+                                        f"{filename} indirildi"
+                                    )
+                                    
+                                    # Aktiviteyi kaydet
+                                    activity = {
+                                        "timestamp": datetime.now().isoformat(),
+                                        "action": "file_download",
+                                        "filename": filename,
+                                        "filesize": filesize,
+                                        "student_no": student_no
+                                    }
+                                    log_student_activity(student_no, activity)
+                                else:
+                                    conn.send("550 Transfer yarim kaldi\n".encode(FORMAT))
+                                    logging.error(f"Eksik transfer: {sent}/{filesize} bytes")
                             except Exception as send_error:
                                 logging.error(f"Dosya gönderme hatası: {send_error}")
-                                raise
-                                
-                                self.update_ui_list(
-                                    student_no,
-                                    student_name,
-                                    addr[0],
-                                    "Aktif",
-                                    connection_time,
-                                    f"{filename} indirildi"
-                                )
-                                
-                                logging.info(f"Dosya başarıyla gönderildi: {student_no} - {filename} ({filesize} bytes)")
-                                
-                                # Aktiviteyi kaydet
-                                activity = {
-                                    "timestamp": datetime.now().isoformat(),
-                                    "action": "file_download",
-                                    "filename": filename,
-                                    "filesize": filesize,
-                                    "student_no": student_no
-                                }
-                                log_student_activity(student_no, activity)
-                            else:
-                                conn.send("550 Transfer yarim kaldi\n".encode(FORMAT))
-                                logging.error(f"Eksik transfer: {sent}/{filesize} bytes")
+                                try:
+                                    data_conn.close()
+                                except:
+                                    pass
+                                try:
+                                    data_server_socket.close()
+                                except:
+                                    pass
+                                conn.send("550 Indirme hatasi\n".encode(FORMAT))
                                 
                         except Exception as e:
                             logging.error(f"Dosya indirme hatası: {e}")

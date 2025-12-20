@@ -36,6 +36,8 @@ class ConfigManager:
             "server": {
                 "host": "0.0.0.0",
                 "port": 2121,
+                "data_port_min": 49152,
+                "data_port_max": 65535,
                 "max_connections": 50,
                 "buffer_size": 4096,
                 "heartbeat_interval": 30,

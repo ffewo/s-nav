@@ -9,6 +9,7 @@ import psutil
 import sys
 import logging
 import json
+import queue
 from datetime import datetime
 from config_manager import get_config
 try:
@@ -29,6 +30,7 @@ if os.path.exists("ip.txt"):
             SERVER_IP = ip_from_file
 
 CONTROL_PORT = config.get("server.port", 2121)
+DATA_PORT = config.get("server.data_port", 2122)
 BUFFER_SIZE = config.get("server.buffer_size", 4096)
 FORMAT = "utf-8"
 RECONNECT_ATTEMPTS = config.get("client.reconnect_attempts", 5)
@@ -36,17 +38,31 @@ RECONNECT_DELAY = config.get("client.reconnect_delay", 3)
 
 # Logging ayarları - config'den al
 log_level = getattr(logging, config.get("logging.level", "INFO").upper())
-logging.basicConfig(
-    level=log_level,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('Logs/client.log'),
-        logging.StreamHandler()
-    ]
-)
 
-# Logs dizinini oluştur
-os.makedirs('Logs', exist_ok=True)
+# Mevcut logger'ları temizle (birden fazla handler eklenmesini önlemek için)
+root_logger = logging.getLogger()
+for handler in root_logger.handlers[:]:
+    root_logger.removeHandler(handler)
+
+# File handler oluştur (append mode)
+file_handler = logging.FileHandler('Logs/client.log', mode='a', encoding='utf-8')
+file_handler.setLevel(log_level)
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+# Console handler oluştur
+console_handler = logging.StreamHandler()
+console_handler.setLevel(log_level)
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+# Logger'ı yapılandır
+root_logger.setLevel(log_level)
+root_logger.addHandler(file_handler)
+root_logger.addHandler(console_handler)
+
+logging.info("="*50)
+logging.info("Sınav sistemi client başlatıldı")
+logging.info(f"Log seviyesi: {log_level}")
+logging.info(f"Log dosyası: Logs/client.log")
 
 class SinavClientGUI:
     def __init__(self, root):
@@ -76,6 +92,9 @@ class SinavClientGUI:
         self.upload_progress_label = None
         # Sınav süresi uyarıları için state
         self.one_minute_warned = False
+        self.time_up_shutdown_called = False  # Sınav bitiş bildirimi için flag
+        # READY mesajı için queue - server_listener READY mesajını buraya koyar
+        self.ready_queue = queue.Queue()
         
         logging.info("Sınav sistemi başlatıldı")
         self.setup_login_ui()
@@ -242,6 +261,24 @@ class SinavClientGUI:
                     data = data.strip()
                     if not data: continue
                     
+                    # 227 mesajlarını queue'ya koy (upload/download thread'leri için)
+                    if data.startswith("227"):
+                        logging.info(f"227 mesajı server_listener tarafından yakalandı ve queue'ya eklendi: {data}")
+                        try:
+                            self.ready_queue.put_nowait(data)
+                        except queue.Full:
+                            logging.warning("227 queue dolu, eski mesaj atlanıyor")
+                        continue
+                    
+                    # READY mesajlarını queue'ya koy (upload/download thread'leri için)
+                    if data.startswith("READY"):
+                        logging.info(f"READY mesajı server_listener tarafından yakalandı ve queue'ya eklendi: {data}")
+                        try:
+                            self.ready_queue.put_nowait(data)
+                        except queue.Full:
+                            logging.warning("READY queue dolu, eski mesaj atlanıyor")
+                        continue
+                    
                     logging.info(f"Sunucudan komut alındı: {data}")
                     
                     if data.startswith("CMD:MSG:"):
@@ -265,7 +302,9 @@ class SinavClientGUI:
                             logging.error(f"Sync parse hatası: {e}")
                         
                     elif data == "CMD:TIME_UP":
-                        self.root.after(0, self.time_up_shutdown)
+                        # Sadece bir kez çağrılmasını garanti et
+                        if not self.time_up_shutdown_called:
+                            self.root.after(0, self.time_up_shutdown)
                     
                     elif data == "PONG":
                         # Heartbeat yanıtı
@@ -293,7 +332,9 @@ class SinavClientGUI:
             if self.app_running:
                 self.root.after(1000, lambda: self.start_countdown(seconds - 1))
         else:
-            self.time_up_shutdown()
+            # Sınav süresi doldu
+            if not self.time_up_shutdown_called:
+                self.time_up_shutdown()
 
     def show_one_minute_warning(self):
         """Sınav bitimine 1 dakika kala uyarı ve ses"""
@@ -314,6 +355,8 @@ class SinavClientGUI:
             self.exam_started = True
             # Yeni sınav başlarken 1 dakika uyarı durumunu sıfırla
             self.one_minute_warned = False
+            # Sınav bitiş flag'ini de sıfırla (yeni sınav için)
+            self.time_up_shutdown_called = False
             try:
                 self.upload_btn.config(state="normal", bg="#FF5722", text="DOSYA YÜKLE / TESLİM ET")
             except Exception as e:
@@ -456,46 +499,107 @@ class SinavClientGUI:
                 self.root.after(0, lambda m=error_msg: messagebox.showerror("İndirme Hatası", m))
                 return
             
-            if not resp.startswith("READY"):
-                self.root.after(0, lambda r=resp: messagebox.showerror("İndirme Hatası", 
-                                                                       f"Sunucu indirmeyi reddetti: {r}"))
+            # Parse data port from 227 response (PASV mode)
+            # IP parse etmiyoruz çünkü client zaten SERVER_IP'yi biliyor
+            data_port = DATA_PORT  # Default
+            if resp.startswith("227"):
+                # Format: 227 Entering Passive Mode (h1,h2,h3,h4,p1,p2)
+                try:
+                    # Extract port from response
+                    start_idx = resp.find("(")
+                    end_idx = resp.find(")")
+                    if start_idx != -1 and end_idx != -1:
+                        port_str = resp[start_idx+1:end_idx]
+                        parts = port_str.split(",")
+                        if len(parts) >= 6:
+                            # Last 2 parts are port (first 4 parts are IP, ama kullanmıyoruz)
+                            data_port = int(parts[4]) * 256 + int(parts[5])
+                            logging.info(f"Data port parse edildi: {data_port}")
+                except Exception as e:
+                    logging.warning(f"Data port parse hatası, varsayılan kullanılıyor: {e}")
+            
+            # Wait for READY message
+            if not resp.startswith("227"):
+                # Try to get READY message
+                try:
+                    self.control_socket.settimeout(5.0)
+                    ready_resp = self.control_socket.recv(BUFFER_SIZE).decode(FORMAT).strip()
+                    if ready_resp.startswith("READY"):
+                        resp = ready_resp
+                except socket.timeout:
+                    pass
+            
+            # Connect to data port (SERVER_IP kullanıyoruz, parse edilen IP değil)
+            # Kısa bir bekleme - server'ın accept() yapması için zaman tanı
+            time.sleep(0.3)  # 300ms bekleme (server'ın hazır olması için)
+            
+            data_socket = None
+            try:
+                data_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                data_socket.settimeout(10.0)
+                logging.info(f"Data port'a bağlanılıyor: {SERVER_IP}:{data_port}")
+                data_socket.connect((SERVER_IP, data_port))
+                logging.info(f"Data port'a bağlandı: {SERVER_IP}:{data_port}")
+                
+                # Bağlandıktan sonra kısa bir bekleme - server'ın READY göndermesi için
+                time.sleep(0.1)  # 100ms bekleme
+            except Exception as e:
+                logging.error(f"Data port bağlantı hatası: {e}")
+                self.root.after(0, lambda: messagebox.showerror("Bağlantı Hatası", 
+                                                               f"Data port'a bağlanılamadı: {e}"))
                 return
             
-            # Parse file size from response (format: READY filesize)
-            try:
-                parts = resp.split()
-                if len(parts) >= 2:
-                    filesize = int(parts[1])
-                else:
-                    filesize = None  # Unknown size, read until connection closes
-            except (ValueError, IndexError):
-                filesize = None
+            # Parse file size from READY response
+            filesize = None
+            if resp.startswith("READY"):
+                try:
+                    parts = resp.split()
+                    if len(parts) >= 2:
+                        filesize = int(parts[1])
+                except (ValueError, IndexError):
+                    pass
+            
+            # If we didn't get READY yet, wait for it from queue or socket
+            if filesize is None:
+                # Önce queue'da READY mesajı var mı kontrol et
+                try:
+                    ready_resp = self.ready_queue.get(timeout=5.0)
+                    if ready_resp.startswith("READY"):
+                        parts = ready_resp.split()
+                        if len(parts) >= 2:
+                            filesize = int(parts[1])
+                            logging.info(f"READY mesajı queue'dan alındı (download): {ready_resp}")
+                except queue.Empty:
+                    # Queue'da yok, socket'ten oku
+                    try:
+                        self.control_socket.settimeout(5.0)
+                        ready_resp = self.control_socket.recv(BUFFER_SIZE).decode(FORMAT).strip()
+                        if ready_resp.startswith("READY"):
+                            parts = ready_resp.split()
+                            if len(parts) >= 2:
+                                filesize = int(parts[1])
+                                logging.info(f"READY mesajı socket'ten alındı (download): {ready_resp}")
+                    except socket.timeout:
+                        logging.warning("READY mesajı zaman aşımı (download)")
+                    except Exception as e:
+                        logging.error(f"READY mesajı okuma hatası (download): {e}")
             
             # Save to working directory
             save_path = os.path.join(os.getcwd(), filename)
             
             # Calculate appropriate timeout based on file size
-            # Allow at least 1 minute per MB, minimum 30 seconds
             if filesize:
                 timeout_seconds = max(30, (filesize / (1024 * 1024)) * 60)  # 1 minute per MB
-                # Cap at 10 minutes for very large files
-                timeout_seconds = min(timeout_seconds, 600)
+                timeout_seconds = min(timeout_seconds, 600)  # Cap at 10 minutes
             else:
                 timeout_seconds = 300  # 5 minutes for unknown size
             
-            # Set longer timeout for file download
-            # For small files, use a minimum timeout to avoid premature timeouts
-            if filesize and filesize < 1024:  # Very small files (< 1KB)
-                timeout_seconds = max(30, timeout_seconds)
-            
-            # Set timeout before starting download
-            self.control_socket.settimeout(timeout_seconds)
+            data_socket.settimeout(timeout_seconds)
             logging.info(f"Dosya indirme başlıyor - timeout: {timeout_seconds:.1f} saniye (dosya boyutu: {filesize} bytes)")
             
-            # Download the file immediately - don't wait, server is already ready
+            # Download the file from data port
             received = 0
             last_progress_time = time.time()
-            last_data_time = time.time()
             download_start_time = time.time()
             
             with open(save_path, "wb") as f:
@@ -505,16 +609,14 @@ class SinavClientGUI:
                         remaining = filesize - received
                         chunk_size = min(BUFFER_SIZE, remaining)
                         try:
-                            # Try to receive data
-                            chunk = self.control_socket.recv(chunk_size)
+                            chunk = data_socket.recv(chunk_size)
                             if not chunk:
                                 logging.warning(f"Beklenmedik veri sonu: {received}/{filesize} bytes")
                                 break
                             f.write(chunk)
                             received += len(chunk)
-                            last_data_time = time.time()  # Update last data received time
                             
-                            # Log progress every 5 seconds or on first chunk
+                            # Log progress every 5 seconds
                             current_time = time.time()
                             if received == len(chunk) or current_time - last_progress_time >= 5.0:
                                 progress = (received / filesize) * 100 if filesize > 0 else 0
@@ -522,59 +624,31 @@ class SinavClientGUI:
                                 speed = received / elapsed if elapsed > 0 else 0
                                 logging.info(f"İndirme ilerlemesi: %{progress:.1f} ({received}/{filesize} bytes, {speed/1024:.1f} KB/s)")
                                 last_progress_time = current_time
-                                # Reset timeout periodically to prevent premature timeout
-                                if received % (BUFFER_SIZE * 10) == 0:
-                                    self.control_socket.settimeout(timeout_seconds)
                         except socket.timeout:
-                            # Check if we've received any data
-                            time_since_data = time.time() - last_data_time
-                            elapsed_total = time.time() - download_start_time
-                            
-                            if received == 0:
-                                # No data received at all - might be server issue
-                                logging.error(f"Sunucudan hiç veri alınamadı (geçen süre: {elapsed_total:.1f}s)")
-                                # Try one more time with a longer timeout
-                                try:
-                                    self.control_socket.settimeout(5.0)
-                                    chunk = self.control_socket.recv(BUFFER_SIZE)
-                                    if chunk:
-                                        f.write(chunk)
-                                        received += len(chunk)
-                                        last_data_time = time.time()
-                                        logging.info(f"Son denemede veri alındı: {len(chunk)} bytes")
-                                        self.control_socket.settimeout(timeout_seconds)
-                                        continue
-                                except:
-                                    pass
-                                raise  # No data received at all, raise the timeout
-                            elif time_since_data > timeout_seconds:
-                                # No data for full timeout period - connection might be dead
-                                logging.error(f"Veri alımı durdu: {time_since_data:.1f} saniye geçti ({received}/{filesize} bytes)")
-                                raise
-                            # Some data received recently, might be slow connection - extend timeout
-                            logging.warning(f"İndirme yavaş, timeout uzatılıyor... ({received}/{filesize} bytes, son veri: {time_since_data:.1f}s önce)")
-                            self.control_socket.settimeout(timeout_seconds * 2)
-                            continue
+                            logging.error(f"İndirme zaman aşımı: {received}/{filesize} bytes")
+                            break
                 else:
                     # Unknown size - read until connection closes
                     while True:
                         try:
-                            chunk = self.control_socket.recv(BUFFER_SIZE)
+                            chunk = data_socket.recv(BUFFER_SIZE)
                             if not chunk:
                                 break
                             f.write(chunk)
                             received += len(chunk)
-                            # Reset timeout periodically for unknown size files
-                            if received % (BUFFER_SIZE * 100) == 0:
-                                self.control_socket.settimeout(timeout_seconds)
                         except socket.timeout:
-                            # For unknown size, if no data for timeout period, assume done
                             if received > 0:
                                 logging.info(f"İndirme tamamlandı (bilinmeyen boyut): {received} bytes")
                                 break
                             raise
             
-            # Wait for completion message (with shorter timeout)
+            # Close data socket
+            try:
+                data_socket.close()
+            except:
+                pass
+            
+            # Wait for completion message from control port
             try:
                 self.control_socket.settimeout(5.0)
                 final_resp = self.control_socket.recv(BUFFER_SIZE).decode(FORMAT).strip()
@@ -602,10 +676,60 @@ class SinavClientGUI:
             messagebox.showwarning("Uyarı", "Sınav henüz başlamadı!")
             return
             
-        filepath = filedialog.askopenfilename(title="Gönderilecek Dosyayı Seçin")
-        if not filepath: return
-        filename = os.path.basename(filepath)
-        threading.Thread(target=self._upload_thread, args=(filepath, filename), daemon=True).start()
+        # Birden fazla dosya seçimine izin ver
+        filepaths = filedialog.askopenfilenames(title="Gönderilecek Dosyaları Seçin (Birden fazla seçebilirsiniz)")
+        if not filepaths: return
+        
+        # Seçilen dosyaları sırayla gönder (thread içinde)
+        total_files = len(filepaths)
+        threading.Thread(target=self._upload_multiple_files, args=(filepaths, total_files), daemon=True).start()
+    
+    def _upload_multiple_files(self, filepaths, total_files):
+        """Birden fazla dosyayı sırayla gönder"""
+        uploaded_count = 0
+        failed_files = []
+        
+        for idx, filepath in enumerate(filepaths):
+            filename = os.path.basename(filepath)
+            is_last = (idx == total_files - 1)
+            
+            logging.info(f"Dosya {idx + 1}/{total_files} gönderiliyor: {filename}")
+            
+            # Her dosyayı sırayla gönder (blocking - skip_shutdown=True ile)
+            # _upload_thread blocking olarak çalışıyor, bu yüzden dosyalar sırayla gönderilecek
+            success = self._upload_thread(filepath, filename, total_files=total_files, skip_shutdown=True)
+            
+            if success:
+                uploaded_count += 1
+                logging.info(f"Dosya {idx + 1}/{total_files} başarıyla gönderildi: {filename}")
+                if not is_last:
+                    # Son dosya değilse kısa bir bekleme
+                    time.sleep(0.5)
+            else:
+                failed_files.append(filename)
+                logging.error(f"Dosya {idx + 1}/{total_files} gönderilemedi: {filename}")
+        
+        # Tüm dosyalar gönderildikten sonra özet mesajı göster
+        if uploaded_count > 0:
+            if len(failed_files) == 0:
+                # Tüm dosyalar başarılı
+                if total_files == 1:
+                    self.root.after(0, self.finish_exam_shutdown)
+                else:
+                    self.root.after(0, lambda: messagebox.showinfo("Başarılı", 
+                                                                   f"Tüm dosyalar başarıyla gönderildi!\n\n"
+                                                                   f"Gönderilen: {uploaded_count} dosya"))
+                    # Son dosya gönderildiğinde sistemi kapat
+                    self.root.after(0, self.finish_exam_shutdown)
+            else:
+                # Bazı dosyalar başarısız
+                failed_list = "\n".join(failed_files)
+                self.root.after(0, lambda: messagebox.showwarning("Kısmi Başarı", 
+                                                                  f"Gönderilen: {uploaded_count} dosya\n"
+                                                                  f"Başarısız: {len(failed_files)} dosya\n\n"
+                                                                  f"Başarısız dosyalar:\n{failed_list}"))
+                # Yine de sistemi kapat (en az bir dosya gönderildi)
+                self.root.after(0, self.finish_exam_shutdown)
 
     # --- Upload Progress UI Helpers ---
     def show_upload_progress(self, filename):
@@ -653,11 +777,11 @@ class SinavClientGUI:
         self.upload_progress_label = None
         self.upload_progress_var.set(0)
 
-    def _upload_thread(self, filepath, filename):
+    def _upload_thread(self, filepath, filename, total_files=1, skip_shutdown=False):
         """Dosya yükleme thread'i"""
         if not self.is_connected:
             self.root.after(0, lambda: messagebox.showerror("Hata", "Sunucuya bağlı değilsiniz!"))
-            return
+            return False
             
         try:
             filesize = os.path.getsize(filepath)
@@ -667,46 +791,233 @@ class SinavClientGUI:
             upload_cmd = f"STOR {filename} {filesize}"
             self.control_socket.send(upload_cmd.encode(FORMAT))
             
-            # Sunucu yanıtını bekle
-            self.control_socket.settimeout(10.0)
-            resp = self.control_socket.recv(BUFFER_SIZE).decode(FORMAT).strip()
-            logging.info(f"Yükleme yanıtı: {resp}")
+            # Sunucu yanıtını bekle - 227 mesajını almak için queue ve socket kullan
+            # server_listener thread'i mesajları queue'ya koyuyor
+            data_port = None
+            resp = None
+            max_attempts = 20  # Daha fazla deneme (birden fazla dosya için)
+            attempt = 0
             
-            # Sunucu hatalarını doğru mesajla göster
-            if resp.startswith("550"):
-                error_msg = resp
-                # Spesifik hata kodlarına göre daha anlaşılır mesajlar
-                if "SINAV_BASLAMADI" in resp:
-                    error_msg = "Sınav başlamadığı için dosya yükleyemezsiniz!"
-                elif "Dosya cok buyuk" in resp:
-                    error_msg = f"Dosya çok büyük. Sunucu yanıtı: {resp}"
-                elif "Transfer yarim kaldi" in resp:
-                    error_msg = "Dosya transferi yarım kaldı. Lütfen tekrar deneyin."
-                elif "Gecersiz dosya boyutu" in resp:
-                    error_msg = "Geçersiz dosya boyutu. Lütfen dosyayı kontrol edin."
-                elif "Yukleme hatasi" in resp:
-                    error_msg = "Sunucuda yükleme hatası oluştu. Lütfen tekrar deneyin."
-                
-                self.root.after(0, lambda m=error_msg: messagebox.showerror("Yükleme Hatası", m))
+            # Queue ve socket'ten 227 mesajını bekle (döngü ile)
+            logging.info(f"227 mesajı bekleniyor (dosya: {filename})...")
+            while attempt < max_attempts and data_port is None:
+                # Önce queue'da 227 mesajı var mı kontrol et
+                try:
+                    resp = self.ready_queue.get(timeout=1.0)  # 1 saniye bekle
+                    if resp.startswith("227"):
+                        logging.info(f"227 mesajı queue'dan alındı: {resp}")
+                        # Parse data port from 227 response
+                        try:
+                            start_idx = resp.find("(")
+                            end_idx = resp.find(")")
+                            if start_idx != -1 and end_idx != -1:
+                                port_str = resp[start_idx+1:end_idx]
+                                parts = port_str.split(",")
+                                if len(parts) >= 6:
+                                    # Last 2 parts are port (first 4 parts are IP)
+                                    data_port = int(parts[4]) * 256 + int(parts[5])
+                                    logging.info(f"Data port parse edildi: {data_port}")
+                                    break
+                        except Exception as e:
+                            logging.warning(f"Data port parse hatası: {e}")
+                    elif resp.startswith("550"):
+                        # Hata mesajı
+                        error_msg = resp
+                        if "SINAV_BASLAMADI" in resp:
+                            error_msg = "Sınav başlamadığı için dosya yükleyemezsiniz!"
+                        elif "Dosya cok buyuk" in resp:
+                            error_msg = f"Dosya çok büyük. Sunucu yanıtı: {resp}"
+                        elif "Transfer yarim kaldi" in resp:
+                            error_msg = "Dosya transferi yarım kaldı. Lütfen tekrar deneyin."
+                        elif "Gecersiz dosya boyutu" in resp:
+                            error_msg = "Geçersiz dosya boyutu. Lütfen dosyayı kontrol edin."
+                        elif "Yukleme hatasi" in resp:
+                            error_msg = "Sunucuda yükleme hatası oluştu. Lütfen tekrar deneyin."
+                        
+                        self.root.after(0, lambda m=error_msg: messagebox.showerror("Yükleme Hatası", m))
+                        return False
+                    else:
+                        # READY veya başka bir mesaj - queue'ya geri koy (sıra önemli)
+                        try:
+                            self.ready_queue.put_nowait(resp)
+                        except queue.Full:
+                            pass
+                        attempt += 1
+                        continue
+                except queue.Empty:
+                    # Queue'da yok, socket'ten oku
+                    try:
+                        self.control_socket.settimeout(2.0)  # Kısa timeout
+                        raw_resp = self.control_socket.recv(BUFFER_SIZE).decode(FORMAT).strip()
+                        
+                        # 227 mesajını ara
+                        if raw_resp.startswith("227"):
+                            resp = raw_resp
+                            logging.info(f"227 mesajı socket'ten alındı: {resp}")
+                            # Parse data port from 227 response
+                            try:
+                                start_idx = resp.find("(")
+                                end_idx = resp.find(")")
+                                if start_idx != -1 and end_idx != -1:
+                                    port_str = resp[start_idx+1:end_idx]
+                                    parts = port_str.split(",")
+                                    if len(parts) >= 6:
+                                        # Last 2 parts are port (first 4 parts are IP)
+                                        data_port = int(parts[4]) * 256 + int(parts[5])
+                                        logging.info(f"Data port parse edildi: {data_port}")
+                                        break
+                            except Exception as e:
+                                logging.warning(f"Data port parse hatası: {e}")
+                        
+                        # Hata mesajı kontrolü
+                        elif raw_resp.startswith("550"):
+                            resp = raw_resp
+                            error_msg = resp
+                            if "SINAV_BASLAMADI" in resp:
+                                error_msg = "Sınav başlamadığı için dosya yükleyemezsiniz!"
+                            elif "Dosya cok buyuk" in resp:
+                                error_msg = f"Dosya çok büyük. Sunucu yanıtı: {resp}"
+                            elif "Transfer yarim kaldi" in resp:
+                                error_msg = "Dosya transferi yarım kaldı. Lütfen tekrar deneyin."
+                            elif "Gecersiz dosya boyutu" in resp:
+                                error_msg = "Geçersiz dosya boyutu. Lütfen dosyayı kontrol edin."
+                            elif "Yukleme hatasi" in resp:
+                                error_msg = "Sunucuda yükleme hatası oluştu. Lütfen tekrar deneyin."
+                            
+                            self.root.after(0, lambda m=error_msg: messagebox.showerror("Yükleme Hatası", m))
+                            return False
+                        
+                        # Diğer mesajlar (CMD:SYNC gibi) - queue'ya koy ve devam et
+                        else:
+                            logging.debug(f"227 bekleniyordu ama farklı mesaj alındı (queue'ya ekleniyor): {raw_resp}")
+                            try:
+                                self.ready_queue.put_nowait(raw_resp)
+                            except queue.Full:
+                                pass
+                            attempt += 1
+                            continue
+                            
+                    except socket.timeout:
+                        attempt += 1
+                        if attempt >= max_attempts:
+                            logging.error("227 mesajı alınamadı - zaman aşımı")
+                            self.root.after(0, lambda: messagebox.showerror("Yükleme Hatası", 
+                                                                           "Sunucudan 227 mesajı alınamadı. Lütfen tekrar deneyin."))
+                            return False
+                        continue
+                    except Exception as e:
+                        logging.error(f"Yanıt alma hatası: {e}")
+                        attempt += 1
+                        if attempt >= max_attempts:
+                            self.root.after(0, lambda: messagebox.showerror("Yükleme Hatası", 
+                                                                           f"Sunucuyla iletişim hatası: {e}"))
+                            return False
+                        continue
+            
+            # Data port parse edilemediyse hata ver
+            if data_port is None:
+                logging.error("Data port parse edilemedi")
+                self.root.after(0, lambda: messagebox.showerror("Yükleme Hatası", 
+                                                               "Sunucudan port bilgisi alınamadı."))
+                return False
+            
+            # Connect to data port (SERVER_IP kullanıyoruz, parse edilen IP değil)
+            # Kısa bir bekleme - server'ın accept() yapması için zaman tanı
+            time.sleep(0.2)  # 200ms bekleme
+            
+            data_socket = None
+            try:
+                data_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                data_socket.settimeout(10.0)
+                logging.info(f"Data port'a bağlanılıyor: {SERVER_IP}:{data_port}")
+                data_socket.connect((SERVER_IP, data_port))
+                logging.info(f"Data port'a bağlandı: {SERVER_IP}:{data_port}")
+            except Exception as e:
+                logging.error(f"Data port bağlantı hatası: {e}")
+                self.root.after(0, lambda: messagebox.showerror("Bağlantı Hatası", 
+                                                               f"Data port'a bağlanılamadı: {e}"))
                 return
             
-            if "READY" not in resp:
-                self.root.after(0, lambda r=resp: messagebox.showerror("Yükleme Hatası", 
-                                                                       f"Sunucu yüklemeyi reddetti: {r}"))
+            # Wait for READY message after connecting to data port
+            # Server will send READY after data connection is established
+            # READY mesajı server_listener tarafından queue'ya konulacak
+            ready_received = False
+            ready_resp = None
+            
+            # Önce queue'da READY mesajı var mı kontrol et
+            try:
+                ready_resp = self.ready_queue.get_nowait()
+                if "READY" in ready_resp:
+                    ready_received = True
+                    logging.info(f"READY mesajı queue'dan alındı: {ready_resp}")
+            except queue.Empty:
+                pass
+            
+            # Queue'da yoksa socket'ten oku (server_listener zaten okumuş olabilir)
+            if not ready_received:
+                try:
+                    self.control_socket.settimeout(20.0)  # 20 saniye timeout
+                    # Kısa bir bekleme - server'ın READY göndermesi için
+                    time.sleep(0.2)
+                    
+                    # Queue'yu tekrar kontrol et (server_listener READY'yi queue'ya koymuş olabilir)
+                    try:
+                        ready_resp = self.ready_queue.get(timeout=0.1)
+                        if "READY" in ready_resp:
+                            ready_received = True
+                            logging.info(f"READY mesajı queue'dan alındı (ikinci deneme): {ready_resp}")
+                    except queue.Empty:
+                        # Queue'da yok, socket'ten oku
+                        try:
+                            self.control_socket.settimeout(19.0)  # Kalan süre
+                            raw_data = self.control_socket.recv(BUFFER_SIZE)
+                            if raw_data:
+                                ready_resp = raw_data.decode(FORMAT).strip()
+                                logging.info(f"Control socket'ten mesaj alındı: {ready_resp}")
+                                if "READY" in ready_resp:
+                                    ready_received = True
+                                    logging.info(f"READY mesajı socket'ten alındı: {ready_resp}")
+                                else:
+                                    logging.warning(f"READY bekleniyordu ama farklı mesaj alındı: {ready_resp}")
+                                    # Hata mesajı ise döngüden çık
+                                    if ready_resp.startswith("550") or ready_resp.startswith("530"):
+                                        pass
+                        except socket.timeout:
+                            logging.warning("READY mesajı zaman aşımı - server'dan yanıt gelmedi")
+                except Exception as e:
+                    logging.error(f"READY mesajı okuma hatası: {e}")
+            
+            if not ready_received:
+                try:
+                    data_socket.close()
+                except:
+                    pass
+                error_msg = "Sunucu READY mesajı göndermedi. Data bağlantısı kurulamadı."
+                if ready_resp:
+                    error_msg += f"\n\nAlınan mesaj: {ready_resp}"
+                self.root.after(0, lambda: messagebox.showerror("Yükleme Hatası", error_msg))
                 return
 
             # Sunucu yüklemeye hazırsa progress penceresini aç
             self.root.after(0, lambda: self.show_upload_progress(filename))
 
-            # Dosyayı gönder
+            # Dosyayı data port üzerinden gönder
             bytes_sent = 0
+            timeout_seconds = max(30, (filesize / (1024 * 1024)) * 60)  # 1 minute per MB
+            timeout_seconds = min(timeout_seconds, 600)  # Cap at 10 minutes
+            data_socket.settimeout(timeout_seconds)
+            
             with open(filepath, "rb") as f:
                 while bytes_sent < filesize:
                     chunk = f.read(min(BUFFER_SIZE, filesize - bytes_sent))
                     if not chunk:
                         break
-                    self.control_socket.sendall(chunk)
-                    bytes_sent += len(chunk)
+                    try:
+                        data_socket.sendall(chunk)
+                        bytes_sent += len(chunk)
+                    except socket.timeout:
+                        logging.error(f"Yükleme zaman aşımı: {bytes_sent}/{filesize} bytes")
+                        break
                     
                     # İlerleme göstergesi (log + progress bar)
                     progress = (bytes_sent / filesize) * 100 if filesize > 0 else 100
@@ -714,6 +1025,12 @@ class SinavClientGUI:
                         logging.info(f"Yükleme ilerlemesi: %{progress:.1f}")
                         # GUI güncellemesini ana thread'de sadece belirli aralıklarda yap
                         self.root.after(0, lambda p=progress, fn=filename: self.update_upload_progress(p, fn))
+            
+            # Close data socket
+            try:
+                data_socket.close()
+            except:
+                pass
             
             # Tamamlanma onayını bekle
             self.control_socket.settimeout(5.0)
@@ -726,17 +1043,24 @@ class SinavClientGUI:
             logging.info(f"Dosya başarıyla yüklendi: {filename}")
             # Progressi %100'e çek
             self.root.after(0, lambda: self.update_upload_progress(100, filename))
-            self.root.after(0, self.finish_exam_shutdown)
+            
+            # finish_exam_shutdown sadece skip_shutdown=False ve tek dosya ise çağrılacak
+            if not skip_shutdown and total_files == 1:
+                self.root.after(0, self.finish_exam_shutdown)
+            
+            return True  # Başarılı
             
         except socket.timeout:
             logging.error("Dosya yükleme zaman aşımı")
             self.root.after(0, lambda: messagebox.showerror("Zaman Aşımı", 
                                                            "Dosya yükleme zaman aşımına uğradı!"))
+            return False
         except Exception as e:
             logging.error(f"Dosya yükleme hatası: {e}")
             self.root.after(0, lambda: messagebox.showerror("Yükleme Hatası", 
                                                            f"Dosya yüklenemedi!\n\nHata: {str(e)}"))
             self.handle_connection_lost()
+            return False
         finally:
             # Hata durumunda da progress penceresini kapat
             self.root.after(0, self.close_upload_progress)
@@ -746,6 +1070,12 @@ class SinavClientGUI:
         self.on_close()
 
     def time_up_shutdown(self):
+        # Birden fazla kez çağrılmasını önle
+        if self.time_up_shutdown_called:
+            return
+        
+        self.time_up_shutdown_called = True
+        logging.info("Sınav süresi doldu - sistem kapatılıyor")
         messagebox.showwarning("SÜRE BİTTİ", "Sınav süresi doldu! Sistem kapatılıyor.")
         self.on_close()
 
