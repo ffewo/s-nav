@@ -39,7 +39,7 @@ class ConfigManager:
                 "data_port_min": 49152,
                 "data_port_max": 65535,
                 "max_connections": 50,
-                "buffer_size": 4096,
+                "buffer_size": 65536,  # 64KB for faster transfers (was 4KB)
                 "heartbeat_interval": 30,
                 "connection_timeout": 300,
                 "max_file_size_mb": 50
