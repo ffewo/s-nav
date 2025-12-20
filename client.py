@@ -68,14 +68,11 @@ class SinavClientGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Sınav Sistemi - Öğrenci")
-        # UI config'den boyutları al
         width = config.get("ui.window_width", 600)
         height = config.get("ui.window_height", 500)
         self.root.geometry(f"{width}x{height}")
         self.root.protocol("WM_DELETE_WINDOW", self.on_close) 
-
         self.app_running = True
-        # Config'den yasaklı uygulamaları al
         self.banned_apps = config.get("security.banned_applications", 
                                      ["chrome.exe", "firefox.exe", "msedge.exe", "opera.exe", "brave.exe"])
         threading.Thread(target=self.browser_killer, daemon=True).start()
@@ -93,7 +90,7 @@ class SinavClientGUI:
         # Sınav süresi uyarıları için state
         self.one_minute_warned = False
         self.time_up_shutdown_called = False  # Sınav bitiş bildirimi için flag
-        # READY mesajı için queue - server_listener READY mesajını buraya koyar
+        # READY mesajı için queue 
         self.ready_queue = queue.Queue()
         
         logging.info("Sınav sistemi başlatıldı")
@@ -101,7 +98,7 @@ class SinavClientGUI:
         self.connect_to_server()
 
     def connect_to_server(self):
-        """Sunucuya bağlanma ve yeniden bağlanma mantığı"""
+        """Sunucuya bağlanma"""
         for attempt in range(RECONNECT_ATTEMPTS):
             try:
                 if self.control_socket:
@@ -381,14 +378,40 @@ class SinavClientGUI:
             return
             
         try:
-            login_cmd = f"LOGIN {no} {pw}"
-            logging.info(f"Giriş denemesi: {no}")
+            # FTP USER komutu gönder
+            user_cmd = f"USER {no}"
+            logging.info(f"USER komutu gönderiliyor: {no}")
             
-            self.control_socket.send(login_cmd.encode(FORMAT))
-            self.control_socket.settimeout(10.0)  # Login için timeout
+            self.control_socket.send(user_cmd.encode(FORMAT))
+            self.control_socket.settimeout(10.0)
             resp = self.control_socket.recv(BUFFER_SIZE).decode(FORMAT).strip()
             
-            logging.info(f"Giriş yanıtı: {resp}")
+            logging.info(f"USER yanıtı: {resp}")
+            
+            # 331 bekleniyor (Password required)
+            if "331" not in resp:
+                if "550" in resp:
+                    messagebox.showerror("Giriş Yasak", 
+                                       "Sınav başladıktan sonra giriş yapamazsınız!\n\n"
+                                       "Lütfen öğretmeninizle iletişime geçin.")
+                    logging.warning(f"Sınav sırasında giriş denemesi: {no}")
+                    self.root.destroy()
+                    sys.exit()
+                else:
+                    messagebox.showerror("Giriş Hatası", 
+                                       f"Sunucu yanıtı: {resp}")
+                    logging.error(f"Beklenmeyen USER yanıtı: {resp}")
+                    return
+            
+            # FTP PASS komutu gönder
+            pass_cmd = f"PASS {pw}"
+            logging.info(f"PASS komutu gönderiliyor")
+            
+            self.control_socket.send(pass_cmd.encode(FORMAT))
+            self.control_socket.settimeout(10.0)
+            resp = self.control_socket.recv(BUFFER_SIZE).decode(FORMAT).strip()
+            
+            logging.info(f"PASS yanıtı: {resp}")
             
             if "550" in resp:
                 messagebox.showerror("Giriş Yasak", 
@@ -483,51 +506,114 @@ class SinavClientGUI:
         try:
             logging.info(f"Dosya indiriliyor: {filename}")
             self.control_socket.send(f"RETR {filename}".encode(FORMAT))
-            self.control_socket.settimeout(10.0)
-            resp = self.control_socket.recv(BUFFER_SIZE).decode(FORMAT).strip()
-            logging.info(f"Dosya indirme yanıtı: {resp}")
             
-            # Check for error responses
-            if resp.startswith("550"):
-                error_msg = resp
-                if "SINAV_BASLAMADI" in resp:
-                    error_msg = "Sınav başlamadığı için dosya indiremezsiniz!"
-                elif "Dosya bulunamadi" in resp:
-                    error_msg = "Dosya bulunamadı!"
-                elif "Once giris yapin" in resp:
-                    error_msg = "Önce giriş yapmalısınız!"
-                self.root.after(0, lambda m=error_msg: messagebox.showerror("İndirme Hatası", m))
+            # 227 mesajını queue veya socket'ten bekle
+            data_port = None
+            max_attempts = 20
+            attempt = 0
+            
+            logging.info(f"227 mesajı bekleniyor (dosya: {filename})...")
+            while attempt < max_attempts and data_port is None:
+                # Önce queue'da 227 mesajı var mı kontrol et
+                try:
+                    resp = self.ready_queue.get(timeout=1.0)
+                    if resp.startswith("227"):
+                        logging.info(f"227 mesajı queue'dan alındı: {resp}")
+                        # Parse data port from 227 response
+                        try:
+                            start_idx = resp.find("(")
+                            end_idx = resp.find(")")
+                            if start_idx != -1 and end_idx != -1:
+                                port_str = resp[start_idx+1:end_idx]
+                                parts = port_str.split(",")
+                                if len(parts) >= 6:
+                                    data_port = int(parts[4]) * 256 + int(parts[5])
+                                    logging.info(f"Data port parse edildi: {data_port}")
+                                    break
+                        except Exception as e:
+                            logging.warning(f"Data port parse hatası: {e}")
+                    elif resp.startswith("550"):
+                        error_msg = resp
+                        if "SINAV_BASLAMADI" in resp:
+                            error_msg = "Sınav başlamadığı için dosya indiremezsiniz!"
+                        elif "File not found" in resp or "Dosya bulunamadi" in resp:
+                            error_msg = "Dosya bulunamadı!"
+                        elif "Please login" in resp or "Once giris yapin" in resp:
+                            error_msg = "Önce giriş yapmalısınız!"
+                        self.root.after(0, lambda m=error_msg: messagebox.showerror("İndirme Hatası", m))
+                        return
+                    elif resp.startswith("150"):
+                        # 150 mesajı - devam et, 227'yi bekle
+                        logging.info(f"150 mesajı alındı: {resp}")
+                        attempt += 1
+                        continue
+                    else:
+                        # Başka bir mesaj - queue'ya geri koy
+                        try:
+                            self.ready_queue.put_nowait(resp)
+                        except queue.Full:
+                            pass
+                        attempt += 1
+                        continue
+                except queue.Empty:
+                    # Queue'da yok, socket'ten oku
+                    try:
+                        self.control_socket.settimeout(2.0)
+                        raw_resp = self.control_socket.recv(BUFFER_SIZE).decode(FORMAT).strip()
+                        logging.info(f"Socket'ten yanıt alındı: {raw_resp}")
+                        
+                        if raw_resp.startswith("227"):
+                            # Parse data port
+                            try:
+                                start_idx = raw_resp.find("(")
+                                end_idx = raw_resp.find(")")
+                                if start_idx != -1 and end_idx != -1:
+                                    port_str = raw_resp[start_idx+1:end_idx]
+                                    parts = port_str.split(",")
+                                    if len(parts) >= 6:
+                                        data_port = int(parts[4]) * 256 + int(parts[5])
+                                        logging.info(f"Data port parse edildi: {data_port}")
+                                        break
+                            except Exception as e:
+                                logging.warning(f"Data port parse hatası: {e}")
+                        elif raw_resp.startswith("550"):
+                            error_msg = raw_resp
+                            if "SINAV_BASLAMADI" in raw_resp:
+                                error_msg = "Sınav başlamadığı için dosya indiremezsiniz!"
+                            elif "File not found" in raw_resp or "Dosya bulunamadi" in raw_resp:
+                                error_msg = "Dosya bulunamadı!"
+                            elif "Please login" in raw_resp or "Once giris yapin" in raw_resp:
+                                error_msg = "Önce giriş yapmalısınız!"
+                            self.root.after(0, lambda m=error_msg: messagebox.showerror("İndirme Hatası", m))
+                            return
+                        elif raw_resp.startswith("150"):
+                            # 150 mesajı - devam et, 227'yi bekle
+                            logging.info(f"150 mesajı alındı: {raw_resp}")
+                            attempt += 1
+                            continue
+                        elif raw_resp.startswith("CMD:"):
+                            # CMD mesajları - görmezden gel, devam et
+                            attempt += 1
+                            continue
+                    except socket.timeout:
+                        attempt += 1
+                        if attempt >= max_attempts:
+                            logging.error("227 mesajı alınamadı - zaman aşımı")
+                            self.root.after(0, lambda: messagebox.showerror("İndirme Hatası", "Sunucudan yanıt alınamadı. Lütfen tekrar deneyin."))
+                            return
+                        continue
+                    except Exception as e:
+                        logging.error(f"Yanıt alma hatası: {e}")
+                        self.root.after(0, lambda: messagebox.showerror("İndirme Hatası", f"Sunucuyla iletişim hatası: {e}"))
+                        return
+            
+            if data_port is None:
+                logging.error("227 mesajı alınamadı - data port bulunamadı")
+                self.root.after(0, lambda: messagebox.showerror("İndirme Hatası", "Sunucudan data port bilgisi alınamadı."))
                 return
             
-            # Parse data port from 227 response (PASV mode)
-            # IP parse etmiyoruz çünkü client zaten SERVER_IP'yi biliyor
-            data_port = DATA_PORT  # Default
-            if resp.startswith("227"):
-                # Format: 227 Entering Passive Mode (h1,h2,h3,h4,p1,p2)
-                try:
-                    # Extract port from response
-                    start_idx = resp.find("(")
-                    end_idx = resp.find(")")
-                    if start_idx != -1 and end_idx != -1:
-                        port_str = resp[start_idx+1:end_idx]
-                        parts = port_str.split(",")
-                        if len(parts) >= 6:
-                            # Last 2 parts are port (first 4 parts are IP, ama kullanmıyoruz)
-                            data_port = int(parts[4]) * 256 + int(parts[5])
-                            logging.info(f"Data port parse edildi: {data_port}")
-                except Exception as e:
-                    logging.warning(f"Data port parse hatası, varsayılan kullanılıyor: {e}")
-            
-            # Wait for READY message
-            if not resp.startswith("227"):
-                # Try to get READY message
-                try:
-                    self.control_socket.settimeout(5.0)
-                    ready_resp = self.control_socket.recv(BUFFER_SIZE).decode(FORMAT).strip()
-                    if ready_resp.startswith("READY"):
-                        resp = ready_resp
-                except socket.timeout:
-                    pass
+            # Varsayılan port yerine parse edilen port kullan
+            logging.info(f"Kullanılacak data port: {data_port}")
             
             # Connect to data port (SERVER_IP kullanıyoruz, parse edilen IP değil)
             # Kısa bir bekleme - server'ın accept() yapması için zaman tanı
@@ -545,8 +631,9 @@ class SinavClientGUI:
                 time.sleep(0.1)  # 100ms bekleme
             except Exception as e:
                 logging.error(f"Data port bağlantı hatası: {e}")
-                self.root.after(0, lambda: messagebox.showerror("Bağlantı Hatası", 
-                                                               f"Data port'a bağlanılamadı: {e}"))
+                error_msg = str(e)
+                self.root.after(0, lambda msg=error_msg: messagebox.showerror("Bağlantı Hatası", 
+                                                               f"Data port'a bağlanılamadı: {msg}"))
                 return
             
             # Parse file size from READY response
@@ -934,8 +1021,9 @@ class SinavClientGUI:
                 logging.info(f"Data port'a bağlandı: {SERVER_IP}:{data_port}")
             except Exception as e:
                 logging.error(f"Data port bağlantı hatası: {e}")
-                self.root.after(0, lambda: messagebox.showerror("Bağlantı Hatası", 
-                                                               f"Data port'a bağlanılamadı: {e}"))
+                error_msg = str(e)
+                self.root.after(0, lambda msg=error_msg: messagebox.showerror("Bağlantı Hatası", 
+                                                               f"Data port'a bağlanılamadı: {msg}"))
                 return
             
             # Wait for READY message after connecting to data port
@@ -1081,7 +1169,19 @@ class SinavClientGUI:
 
     def on_close(self):
         self.app_running = False
-        try: self.control_socket.close()
+        # QUIT komutunu gönder (FTP uyumluluğu için)
+        if self.is_connected and self.control_socket:
+            try:
+                self.control_socket.send("QUIT\n".encode(FORMAT))
+                self.control_socket.settimeout(2.0)
+                resp = self.control_socket.recv(BUFFER_SIZE).decode(FORMAT).strip()
+                logging.info(f"QUIT yanıtı: {resp}")
+            except Exception as e:
+                logging.warning(f"QUIT komutu gönderilemedi: {e}")
+        
+        try: 
+            if self.control_socket:
+                self.control_socket.close()
         except: pass
         try: self.root.destroy()
         except: pass

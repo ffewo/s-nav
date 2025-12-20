@@ -42,6 +42,7 @@ Thumbs.db
 desktop.ini
 
 # Sınav sistemi özel dosyaları
+Logs/
 client.log
 server.log
 test_*.py
@@ -53,6 +54,7 @@ ip.txt
 # Cevap dosyaları (güvenlik için)
 Cevaplar/*
 !Cevaplar/.gitkeep
+Sorular/
 
 # Geçici konfigürasyon dosyaları
 config.json.backup.*
