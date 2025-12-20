@@ -20,7 +20,7 @@ except ImportError:
 config = get_config()
 
 # --- AYARLAR ---
-# Önce ip.txt dosyasını kontrol et (geriye uyumluluk)
+# Önce ip.txt dosyasını kontrol et 
 SERVER_IP = config.get("client.server_ip", "127.0.0.1")
 if os.path.exists("ip.txt"):
     with open("ip.txt", "r") as f: 
@@ -61,7 +61,7 @@ class SinavClientGUI:
         self.app_running = True
         # Config'den yasaklı uygulamaları al
         self.banned_apps = config.get("security.banned_applications", 
-                                     ["chrome.exe", "firefox.exe", "msedge.exe", "opera.exe", "brave.exe","firefox.exe"])
+                                     ["chrome.exe", "firefox.exe", "msedge.exe", "opera.exe", "brave.exe"])
         threading.Thread(target=self.browser_killer, daemon=True).start()
 
         self.control_socket = None
@@ -414,6 +414,11 @@ class SinavClientGUI:
             if f: self.file_listbox.insert(tk.END, f)
 
     def download_and_open(self):
+        # Check if exam has started
+        if not self.exam_started:
+            messagebox.showwarning("Uyarı", "Sınav henüz başlamadı! Dosya indiremezsiniz.")
+            return
+            
         selection = self.file_listbox.curselection()
         if not selection: 
             messagebox.showwarning("Uyarı", "Dosya seçmediniz.")
@@ -426,20 +431,168 @@ class SinavClientGUI:
         if not self.is_connected:
             self.root.after(0, lambda: messagebox.showerror("Hata", "Sunucuya bağlı değilsiniz!"))
             return
+        
+        # Double check exam started (in case it changed between UI click and thread execution)
+        if not self.exam_started:
+            self.root.after(0, lambda: messagebox.showwarning("Uyarı", "Sınav henüz başlamadı! Dosya indiremezsiniz."))
+            return
             
         try:
             logging.info(f"Dosya indiriliyor: {filename}")
             self.control_socket.send(f"RETR {filename}".encode(FORMAT))
+            self.control_socket.settimeout(10.0)
+            resp = self.control_socket.recv(BUFFER_SIZE).decode(FORMAT).strip()
+            logging.info(f"Dosya indirme yanıtı: {resp}")
             
-            # Gerçek indirme işlemi burada yapılabilir
-            # Şimdilik simülasyon
+            # Check for error responses
+            if resp.startswith("550"):
+                error_msg = resp
+                if "SINAV_BASLAMADI" in resp:
+                    error_msg = "Sınav başlamadığı için dosya indiremezsiniz!"
+                elif "Dosya bulunamadi" in resp:
+                    error_msg = "Dosya bulunamadı!"
+                elif "Once giris yapin" in resp:
+                    error_msg = "Önce giriş yapmalısınız!"
+                self.root.after(0, lambda m=error_msg: messagebox.showerror("İndirme Hatası", m))
+                return
+            
+            if not resp.startswith("READY"):
+                self.root.after(0, lambda r=resp: messagebox.showerror("İndirme Hatası", 
+                                                                       f"Sunucu indirmeyi reddetti: {r}"))
+                return
+            
+            # Parse file size from response (format: READY filesize)
+            try:
+                parts = resp.split()
+                if len(parts) >= 2:
+                    filesize = int(parts[1])
+                else:
+                    filesize = None  # Unknown size, read until connection closes
+            except (ValueError, IndexError):
+                filesize = None
+            
+            # Save to working directory
+            save_path = os.path.join(os.getcwd(), filename)
+            
+            # Calculate appropriate timeout based on file size
+            # Allow at least 1 minute per MB, minimum 30 seconds
+            if filesize:
+                timeout_seconds = max(30, (filesize / (1024 * 1024)) * 60)  # 1 minute per MB
+                # Cap at 10 minutes for very large files
+                timeout_seconds = min(timeout_seconds, 600)
+            else:
+                timeout_seconds = 300  # 5 minutes for unknown size
+            
+            # Set longer timeout for file download
+            # For small files, use a minimum timeout to avoid premature timeouts
+            if filesize and filesize < 1024:  # Very small files (< 1KB)
+                timeout_seconds = max(30, timeout_seconds)
+            
+            # Set timeout before starting download
+            self.control_socket.settimeout(timeout_seconds)
+            logging.info(f"Dosya indirme başlıyor - timeout: {timeout_seconds:.1f} saniye (dosya boyutu: {filesize} bytes)")
+            
+            # Download the file immediately - don't wait, server is already ready
+            received = 0
+            last_progress_time = time.time()
+            last_data_time = time.time()
+            download_start_time = time.time()
+            
+            with open(save_path, "wb") as f:
+                if filesize:
+                    # Known size - read exactly that amount
+                    while received < filesize:
+                        remaining = filesize - received
+                        chunk_size = min(BUFFER_SIZE, remaining)
+                        try:
+                            # Try to receive data
+                            chunk = self.control_socket.recv(chunk_size)
+                            if not chunk:
+                                logging.warning(f"Beklenmedik veri sonu: {received}/{filesize} bytes")
+                                break
+                            f.write(chunk)
+                            received += len(chunk)
+                            last_data_time = time.time()  # Update last data received time
+                            
+                            # Log progress every 5 seconds or on first chunk
+                            current_time = time.time()
+                            if received == len(chunk) or current_time - last_progress_time >= 5.0:
+                                progress = (received / filesize) * 100 if filesize > 0 else 0
+                                elapsed = current_time - download_start_time
+                                speed = received / elapsed if elapsed > 0 else 0
+                                logging.info(f"İndirme ilerlemesi: %{progress:.1f} ({received}/{filesize} bytes, {speed/1024:.1f} KB/s)")
+                                last_progress_time = current_time
+                                # Reset timeout periodically to prevent premature timeout
+                                if received % (BUFFER_SIZE * 10) == 0:
+                                    self.control_socket.settimeout(timeout_seconds)
+                        except socket.timeout:
+                            # Check if we've received any data
+                            time_since_data = time.time() - last_data_time
+                            elapsed_total = time.time() - download_start_time
+                            
+                            if received == 0:
+                                # No data received at all - might be server issue
+                                logging.error(f"Sunucudan hiç veri alınamadı (geçen süre: {elapsed_total:.1f}s)")
+                                # Try one more time with a longer timeout
+                                try:
+                                    self.control_socket.settimeout(5.0)
+                                    chunk = self.control_socket.recv(BUFFER_SIZE)
+                                    if chunk:
+                                        f.write(chunk)
+                                        received += len(chunk)
+                                        last_data_time = time.time()
+                                        logging.info(f"Son denemede veri alındı: {len(chunk)} bytes")
+                                        self.control_socket.settimeout(timeout_seconds)
+                                        continue
+                                except:
+                                    pass
+                                raise  # No data received at all, raise the timeout
+                            elif time_since_data > timeout_seconds:
+                                # No data for full timeout period - connection might be dead
+                                logging.error(f"Veri alımı durdu: {time_since_data:.1f} saniye geçti ({received}/{filesize} bytes)")
+                                raise
+                            # Some data received recently, might be slow connection - extend timeout
+                            logging.warning(f"İndirme yavaş, timeout uzatılıyor... ({received}/{filesize} bytes, son veri: {time_since_data:.1f}s önce)")
+                            self.control_socket.settimeout(timeout_seconds * 2)
+                            continue
+                else:
+                    # Unknown size - read until connection closes
+                    while True:
+                        try:
+                            chunk = self.control_socket.recv(BUFFER_SIZE)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            received += len(chunk)
+                            # Reset timeout periodically for unknown size files
+                            if received % (BUFFER_SIZE * 100) == 0:
+                                self.control_socket.settimeout(timeout_seconds)
+                        except socket.timeout:
+                            # For unknown size, if no data for timeout period, assume done
+                            if received > 0:
+                                logging.info(f"İndirme tamamlandı (bilinmeyen boyut): {received} bytes")
+                                break
+                            raise
+            
+            # Wait for completion message (with shorter timeout)
+            try:
+                self.control_socket.settimeout(5.0)
+                final_resp = self.control_socket.recv(BUFFER_SIZE).decode(FORMAT).strip()
+                logging.info(f"İndirme tamamlandı: {final_resp}")
+            except socket.timeout:
+                logging.warning("İndirme onayı zaman aşımı (dosya indirildi olabilir)")
+            
             self.root.after(0, lambda: messagebox.showinfo("Başarılı", 
                                                           f"{filename} başarıyla indirildi!\n\n"
-                                                          f"Dosya masaüstünüze kaydedildi."))
-            logging.info(f"Dosya başarıyla indirildi: {filename}")
+                                                          f"Dosya çalışma dizinine kaydedildi:\n{save_path}"))
+            logging.info(f"Dosya başarıyla indirildi: {filename} ({received} bytes) -> {save_path}")
+        except socket.timeout:
+            logging.error("Dosya indirme zaman aşımı")
+            self.root.after(0, lambda: messagebox.showerror("Zaman Aşımı", 
+                                                           "Dosya indirme zaman aşımına uğradı!"))
         except Exception as e:
             logging.error(f"Dosya indirme hatası: {e}")
-            self.root.after(0, lambda: messagebox.showerror("Hata", 
+            self.root.after(0, lambda: messagebox.showerror("İndirme Hatası", 
                                                            f"Dosya indirilemedi!\n\nHata: {str(e)}"))
             self.handle_connection_lost()
 

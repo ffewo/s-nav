@@ -8,6 +8,7 @@ import time
 from datetime import datetime
 import json
 from config_manager import get_config
+from file_manager import get_secure_file_handler, get_question_file_manager
 
 # Konfigürasyonu yükle
 config = get_config()
@@ -421,7 +422,10 @@ class TeacherServerGUI:
                             continue
                             
                         try:
-                            files = [f for f in os.listdir("Sorular") if os.path.isfile(os.path.join("Sorular", f))]
+                            # Use QuestionFileManager to list files
+                            question_manager = get_question_file_manager()
+                            files_info = question_manager.list_question_files()
+                            files = [f["filename"] for f in files_info]
                             files_str = ",".join(files) if files else ""
                             conn.send(f"DATA_LIST:{files_str}\n".encode(FORMAT))
                             
@@ -487,52 +491,66 @@ class TeacherServerGUI:
                                 current_delivery_time
                             )
                             
-                            # Dosyayı al
-                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                            safe_filename = f"{student_no}_{timestamp}_{filename}"
-                            save_path = os.path.join("Cevaplar", safe_filename)
+                            # Use SecureFileHandler to receive and save file
+                            secure_handler = get_secure_file_handler()
                             
+                            # Receive file data
                             received = 0
-                            with open(save_path, "wb") as f:
-                                while received < filesize:
-                                    remaining = filesize - received
-                                    chunk_size = min(BUFFER_SIZE, remaining)
-                                    chunk = conn.recv(chunk_size)
-                                    if not chunk: 
-                                        break
-                                    f.write(chunk)
-                                    received += len(chunk)
+                            file_data_chunks = []
+                            while received < filesize:
+                                remaining = filesize - received
+                                chunk_size = min(BUFFER_SIZE, remaining)
+                                chunk = conn.recv(chunk_size)
+                                if not chunk: 
+                                    break
+                                file_data_chunks.append(chunk)
+                                received += len(chunk)
                             
                             if received == filesize:
-                                conn.send("226 Transfer tamamlandi\n".encode(FORMAT))
+                                # Combine all chunks
+                                file_data = b''.join(file_data_chunks)
                                 
-                                # Teslim bilgilerini güncelle
-                                delivery_time = datetime.now().strftime("%H:%M:%S")
-                                if student_no in connected_students:
-                                    connected_students[student_no]["delivery_file"] = filename
-                                    connected_students[student_no]["delivery_time"] = delivery_time
-                                
-                                self.update_ui_list(
-                                    student_no,
-                                    student_name,
-                                    addr[0],
-                                    "TESLİM EDİLDİ",
-                                    connection_time,
-                                    f"CEVAP TESLİM EDİLDİ: {filename}",
-                                    filename,
-                                    delivery_time
+                                # Save file securely using SecureFileHandler
+                                success, save_path, safe_filename = secure_handler.save_file_securely(
+                                    file_data, 
+                                    student_no, 
+                                    filename
                                 )
-                                logging.info(f"Dosya başarıyla alındı: {student_no} - {safe_filename}")
                                 
-                                # Aktiviteyi kaydet
-                                activity = {
-                                    "timestamp": datetime.now().isoformat(),
-                                    "action": "file_upload",
-                                    "filename": filename,
-                                    "filesize": filesize,
-                                    "student_no": student_no
-                                }
-                                log_student_activity(student_no, activity)
+                                if success:
+                                    conn.send("226 Transfer tamamlandi\n".encode(FORMAT))
+                                    
+                                    # Teslim bilgilerini güncelle
+                                    delivery_time = datetime.now().strftime("%H:%M:%S")
+                                    if student_no in connected_students:
+                                        connected_students[student_no]["delivery_file"] = filename
+                                        connected_students[student_no]["delivery_time"] = delivery_time
+                                    
+                                    self.update_ui_list(
+                                        student_no,
+                                        student_name,
+                                        addr[0],
+                                        "TESLİM EDİLDİ",
+                                        connection_time,
+                                        f"CEVAP TESLİM EDİLDİ: {filename}",
+                                        filename,
+                                        delivery_time
+                                    )
+                                    logging.info(f"Dosya başarıyla alındı: {student_no} - {safe_filename} (güvenli kayıt)")
+                                    
+                                    # Aktiviteyi kaydet
+                                    activity = {
+                                        "timestamp": datetime.now().isoformat(),
+                                        "action": "file_upload",
+                                        "filename": filename,
+                                        "filesize": filesize,
+                                        "student_no": student_no,
+                                        "saved_filename": safe_filename
+                                    }
+                                    log_student_activity(student_no, activity)
+                                else:
+                                    conn.send("550 Dosya kaydetme hatasi\n".encode(FORMAT))
+                                    logging.error(f"Dosya kaydetme başarısız: {safe_filename}")
                             else:
                                 conn.send("550 Transfer yarim kaldi\n".encode(FORMAT))
                                 logging.error(f"Eksik transfer: {received}/{filesize} bytes")
@@ -542,6 +560,110 @@ class TeacherServerGUI:
                         except Exception as e:
                             logging.error(f"Dosya yükleme hatası: {e}")
                             conn.send("550 Yukleme hatasi\n".encode(FORMAT))
+                    
+                    elif cmd == "RETR":
+                        if student_no == "Bilinmiyor":
+                            conn.send("550 Once giris yapin\n".encode(FORMAT))
+                            continue
+                        
+                        # GÜVENLİK KONTROLÜ - Sınav başlamadan dosya indirilemez
+                        if not self.exam_started:
+                            conn.send("550 SINAV_BASLAMADI_INDIRME_YASAK\n".encode(FORMAT))
+                            logging.warning(f"Sınav başlamadan indirme denemesi: {student_no}")
+                            continue
+                        
+                        if len(parts) < 2:
+                            conn.send("550 Eksik parametre (dosya adı gerekli)\n".encode(FORMAT))
+                            continue
+                        
+                        try:
+                            filename = parts[1]
+                            
+                            # Use QuestionFileManager to get file content
+                            question_manager = get_question_file_manager()
+                            file_data = question_manager.get_file_content(filename)
+                            
+                            if file_data is None:
+                                conn.send("550 Dosya bulunamadi\n".encode(FORMAT))
+                                logging.warning(f"Dosya bulunamadı: {filename} (öğrenci: {student_no})")
+                                continue
+                            
+                            # Dosya boyutunu al
+                            filesize = len(file_data)
+                            
+                            # İndirmeye hazır olduğunu bildir
+                            ready_msg = f"READY {filesize}\n".encode(FORMAT)
+                            conn.send(ready_msg)
+                            logging.info(f"READY mesajı gönderildi: {filename} ({filesize} bytes)")
+                            
+                            # Aktiviteyi güncelle
+                            if student_no in connected_students:
+                                connected_students[student_no]["last_activity"] = datetime.now()
+                            
+                            self.update_ui_list(
+                                student_no,
+                                student_name,
+                                addr[0],
+                                "İndiriyor",
+                                connection_time,
+                                f"{filename} indiriliyor... ({filesize} bytes)"
+                            )
+                            
+                            # Çok kısa bir bekleme - istemcinin READY mesajını işlemesi için
+                            # Ama çok uzun olmamalı, yoksa istemci timeout olabilir
+                            time.sleep(0.05)  # 50ms yeterli
+                            
+                            # Dosyayı gönder
+                            sent = 0
+                            try:
+                                while sent < filesize:
+                                    remaining = filesize - sent
+                                    chunk_size = min(BUFFER_SIZE, remaining)
+                                    chunk = file_data[sent:sent + chunk_size]
+                                    if not chunk:
+                                        break
+                                    conn.sendall(chunk)
+                                    sent += len(chunk)
+                                    
+                                    # Büyük dosyalar için ilerleme logla
+                                    if filesize > 1024 * 1024 and sent % (1024 * 1024) == 0:  # Her MB'da bir
+                                        logging.info(f"Dosya gönderiliyor: {sent}/{filesize} bytes ({sent*100//filesize}%)")
+                                
+                                if sent == filesize:
+                                    # Transfer tamamlandı mesajını gönder
+                                    conn.send("226 Transfer tamamlandi\n".encode(FORMAT))
+                                    logging.info(f"Dosya başarıyla gönderildi: {student_no} - {filename} ({filesize} bytes)")
+                            except Exception as send_error:
+                                logging.error(f"Dosya gönderme hatası: {send_error}")
+                                raise
+                                
+                                self.update_ui_list(
+                                    student_no,
+                                    student_name,
+                                    addr[0],
+                                    "Aktif",
+                                    connection_time,
+                                    f"{filename} indirildi"
+                                )
+                                
+                                logging.info(f"Dosya başarıyla gönderildi: {student_no} - {filename} ({filesize} bytes)")
+                                
+                                # Aktiviteyi kaydet
+                                activity = {
+                                    "timestamp": datetime.now().isoformat(),
+                                    "action": "file_download",
+                                    "filename": filename,
+                                    "filesize": filesize,
+                                    "student_no": student_no
+                                }
+                                log_student_activity(student_no, activity)
+                            else:
+                                conn.send("550 Transfer yarim kaldi\n".encode(FORMAT))
+                                logging.error(f"Eksik transfer: {sent}/{filesize} bytes")
+                                
+                        except Exception as e:
+                            logging.error(f"Dosya indirme hatası: {e}")
+                            conn.send("550 Indirme hatasi\n".encode(FORMAT))
                     
                     elif cmd == "PING":
                         conn.send("PONG\n".encode(FORMAT))

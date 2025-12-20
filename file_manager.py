@@ -6,83 +6,10 @@ Bu modül dosya işlemlerini güvenli ve güvenilir şekilde yönetir.
 import os
 import shutil
 import hashlib
-import time
-import threading
 import logging
-from typing import Optional, Tuple, Dict, List, Callable
+from typing import Optional, Tuple, Dict, List
 from datetime import datetime
 import json
-
-class FileTransferManager:
-    """Dosya transfer yöneticisi"""
-    
-    def __init__(self):
-        self.active_transfers = {}  # transfer_id -> transfer_info
-        self.transfer_lock = threading.Lock()
-        
-    def start_upload(self, student_no: str, filename: str, filesize: int, 
-                    progress_callback: Optional[Callable] = None) -> str:
-        """Dosya yükleme işlemini başlat"""
-        transfer_id = f"{student_no}_{int(time.time())}_{filename}"
-        
-        with self.transfer_lock:
-            self.active_transfers[transfer_id] = {
-                "student_no": student_no,
-                "filename": filename,
-                "filesize": filesize,
-                "bytes_received": 0,
-                "start_time": time.time(),
-                "status": "active",
-                "progress_callback": progress_callback,
-                "temp_file": None,
-                "final_file": None
-            }
-        
-        logging.info(f"Dosya yükleme başlatıldı: {transfer_id}")
-        return transfer_id
-    
-    def update_progress(self, transfer_id: str, bytes_received: int):
-        """Transfer ilerlemesini güncelle"""
-        with self.transfer_lock:
-            if transfer_id in self.active_transfers:
-                transfer_info = self.active_transfers[transfer_id]
-                transfer_info["bytes_received"] = bytes_received
-                
-                # Progress callback çağır
-                if transfer_info["progress_callback"]:
-                    progress = (bytes_received / transfer_info["filesize"]) * 100
-                    transfer_info["progress_callback"](progress)
-    
-    def complete_transfer(self, transfer_id: str, success: bool = True):
-        """Transfer'ı tamamla"""
-        with self.transfer_lock:
-            if transfer_id in self.active_transfers:
-                transfer_info = self.active_transfers[transfer_id]
-                transfer_info["status"] = "completed" if success else "failed"
-                transfer_info["end_time"] = time.time()
-                
-                duration = transfer_info["end_time"] - transfer_info["start_time"]
-                logging.info(f"Transfer tamamlandı: {transfer_id} - {duration:.2f}s")
-    
-    def get_transfer_info(self, transfer_id: str) -> Optional[Dict]:
-        """Transfer bilgilerini al"""
-        with self.transfer_lock:
-            return self.active_transfers.get(transfer_id)
-    
-    def cleanup_old_transfers(self, max_age_hours: int = 24):
-        """Eski transfer kayıtlarını temizle"""
-        current_time = time.time()
-        max_age_seconds = max_age_hours * 3600
-        
-        with self.transfer_lock:
-            to_remove = []
-            for transfer_id, info in self.active_transfers.items():
-                if current_time - info["start_time"] > max_age_seconds:
-                    to_remove.append(transfer_id)
-            
-            for transfer_id in to_remove:
-                del self.active_transfers[transfer_id]
-                logging.info(f"Eski transfer kaydı temizlendi: {transfer_id}")
 
 class SecureFileHandler:
     """Güvenli dosya işleyici"""
@@ -218,82 +145,6 @@ class SecureFileHandler:
             logging.error(f"Hash hesaplama hatası: {e}")
             return ""
     
-    def get_file_info(self, file_path: str) -> Optional[Dict]:
-        """Dosya bilgilerini al"""
-        try:
-            metadata_path = file_path + ".meta"
-            if os.path.exists(metadata_path):
-                with open(metadata_path, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            return None
-        except Exception as e:
-            logging.error(f"Dosya bilgisi okuma hatası: {e}")
-            return None
-    
-    def list_student_files(self, student_no: str) -> List[Dict]:
-        """Öğrencinin dosyalarını listele"""
-        files = []
-        try:
-            for filename in os.listdir(self.base_dir):
-                if filename.startswith(f"{student_no}_") and not filename.endswith('.meta'):
-                    file_path = os.path.join(self.base_dir, filename)
-                    file_info = self.get_file_info(file_path)
-                    
-                    if file_info:
-                        file_info["saved_filename"] = filename
-                        file_info["file_path"] = file_path
-                        files.append(file_info)
-            
-            # Yükleme zamanına göre sırala
-            files.sort(key=lambda x: x.get("upload_time", ""), reverse=True)
-            
-        except Exception as e:
-            logging.error(f"Dosya listeleme hatası: {e}")
-        
-        return files
-    
-    def backup_file(self, file_path: str) -> Optional[str]:
-        """Dosyanın yedeğini oluştur"""
-        try:
-            if not os.path.exists(file_path):
-                return None
-            
-            backup_dir = os.path.join(self.base_dir, "backups")
-            self.ensure_directory_exists(backup_dir)
-            
-            filename = os.path.basename(file_path)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_filename = f"{timestamp}_{filename}"
-            backup_path = os.path.join(backup_dir, backup_filename)
-            
-            shutil.copy2(file_path, backup_path)
-            
-            # Metadata'yı da yedekle
-            meta_path = file_path + ".meta"
-            if os.path.exists(meta_path):
-                backup_meta_path = backup_path + ".meta"
-                shutil.copy2(meta_path, backup_meta_path)
-            
-            logging.info(f"Dosya yedeği oluşturuldu: {backup_path}")
-            return backup_path
-            
-        except Exception as e:
-            logging.error(f"Dosya yedekleme hatası: {e}")
-            return None
-    
-    def cleanup_temp_files(self):
-        """Geçici dosyaları temizle"""
-        try:
-            for filename in os.listdir(self.base_dir):
-                if filename.endswith('.tmp'):
-                    file_path = os.path.join(self.base_dir, filename)
-                    # 1 saatten eski geçici dosyaları sil
-                    if time.time() - os.path.getctime(file_path) > 3600:
-                        os.remove(file_path)
-                        logging.info(f"Eski geçici dosya silindi: {filename}")
-        except Exception as e:
-            logging.error(f"Geçici dosya temizleme hatası: {e}")
-
 class QuestionFileManager:
     """Soru dosyası yöneticisi"""
     
@@ -344,16 +195,8 @@ class QuestionFileManager:
             return None
 
 # Global instance'lar
-_file_transfer_manager = None
 _secure_file_handler = None
 _question_file_manager = None
-
-def get_file_transfer_manager() -> FileTransferManager:
-    """Global dosya transfer yöneticisini al"""
-    global _file_transfer_manager
-    if _file_transfer_manager is None:
-        _file_transfer_manager = FileTransferManager()
-    return _file_transfer_manager
 
 def get_secure_file_handler() -> SecureFileHandler:
     """Global güvenli dosya işleyicisini al"""
@@ -369,22 +212,3 @@ def get_question_file_manager() -> QuestionFileManager:
         _question_file_manager = QuestionFileManager()
     return _question_file_manager
 
-if __name__ == "__main__":
-    # Test
-    handler = SecureFileHandler()
-    
-    # Test dosyası oluştur
-    test_data = b"Bu bir test dosyasidir."
-    success, path, filename = handler.save_file_securely(test_data, "123456", "test.txt")
-    
-    print(f"Kaydetme başarılı: {success}")
-    print(f"Dosya yolu: {path}")
-    print(f"Güvenli dosya adı: {filename}")
-    
-    # Dosya bilgilerini al
-    info = handler.get_file_info(path)
-    print(f"Dosya bilgileri: {info}")
-    
-    # Öğrenci dosyalarını listele
-    files = handler.list_student_files("123456")
-    print(f"Öğrenci dosyaları: {files}")
