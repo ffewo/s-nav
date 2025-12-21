@@ -1,9 +1,8 @@
-"""Sınav Sistemi - Öğretmen Sunucu"""
+"""Sınav Sistemi - Öğretmen Sunucu Core Logic"""
 import socket
 import threading
 import os
-import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+import time
 import logging
 from datetime import datetime
 import json
@@ -105,175 +104,40 @@ def log_student_activity(student_no, activity):
     except Exception as e:
         logging.error(f"Aktivite loglama hatası: {e}")
 
-class TeacherServerGUI:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Öğretmen Kontrol Paneli - Sınav Sistemi")
-        width = config.get("ui.window_width", 900)
-        height = config.get("ui.window_height", 600)
-        self.root.geometry(f"{width}x{height}")
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+class ServerCore:
+    """Server core logic - handles networking, state management, and business logic"""
+    
+    def __init__(self, ui_update_callback=None):
+        """
+        Initialize server core
         
-        self.exam_started = False 
+        Args:
+            ui_update_callback: Callback function(no, name, ip, status, connection_time, action, delivery_file, delivery_time)
+        """
+        self.ui_update_callback = ui_update_callback
+        self.server_socket = None
+        self.server_running = False
+        self.exam_started = False
         self.exam_time_remaining = 0
         self.timer_running = False
-        self.server_running = True
         self.start_time = None
-        
-        logging.info("Öğretmen kontrol paneli başlatıldı")
-        self.setup_ui()
-        self.server_socket = None
-        self.start_server()
-        self.update_connection_count()
+        self.connected_students = connected_students  # Shared reference
     
-    def setup_ui(self):
-        """UI bileşenlerini oluştur"""
-        # Üst kontrol paneli
-        top_frame = tk.Frame(self.root, pady=10, bg="#f0f0f0")
-        top_frame.pack(side=tk.TOP, fill=tk.X)
-        
-        left_buttons = tk.Frame(top_frame, bg="#f0f0f0")
-        left_buttons.pack(side=tk.LEFT)
-        
-        tk.Button(left_buttons, text="🚀 Sınavı Başlat", bg="#d32f2f", fg="white", 
-                 font=("Arial", 10, "bold"), command=self.start_exam_timer).pack(side=tk.LEFT, padx=5)
-        tk.Button(left_buttons, text="📢 Duyuru Gönder", bg="#2196F3", fg="white", 
-                 font=("Arial", 10), command=self.send_broadcast).pack(side=tk.LEFT, padx=5)
-        tk.Button(left_buttons, text="🔓 Girişleri Aç", bg="#4CAF50", fg="white",
-                 font=("Arial", 10), command=self.unlock_entries).pack(side=tk.LEFT, padx=5)
-        tk.Button(left_buttons, text="📊 İstatistikler", bg="#FF9800", fg="white",
-                 font=("Arial", 10), command=self.show_statistics).pack(side=tk.LEFT, padx=5)
-        
-        right_info = tk.Frame(top_frame, bg="#f0f0f0")
-        right_info.pack(side=tk.RIGHT)
-        
-        self.timer_lbl = tk.Label(right_info, text="⏰ Süre: --:--", fg="blue", 
-                                 font=("Arial", 12, "bold"), bg="#f0f0f0")
-        self.timer_lbl.pack(side=tk.RIGHT, padx=10)
-        
-        self.status_lbl = tk.Label(right_info, text="✅ Durum: Girişler AÇIK", fg="green", 
-                                  font=("Arial", 10, "bold"), bg="#f0f0f0")
-        self.status_lbl.pack(side=tk.RIGHT, padx=10)
-        
-        self.connection_lbl = tk.Label(right_info, text="🌐 Bağlantı: 0 öğrenci", 
-                                      fg="blue", font=("Arial", 10), bg="#f0f0f0")
-        self.connection_lbl.pack(side=tk.RIGHT, padx=10)
-        
-        # Öğrenci listesi
-        list_frame = tk.Frame(self.root)
-        list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-        
-        tk.Label(list_frame, text="👥 Bağlı Öğrenciler", font=("Arial", 12, "bold")).pack(anchor="w")
-        
-        tree_frame = tk.Frame(list_frame)
-        tree_frame.pack(fill=tk.BOTH, expand=True)
-        
-        self.tree = ttk.Treeview(
-            tree_frame,
-            columns=("No", "Ad", "IP", "Durum", "Bağlantı", "Son İşlem", "Teslim Dosyası", "Teslim Zamanı"),
-            show='headings'
-        )
-        
-        for col, text in [("No", "Öğrenci No"), ("Ad", "Ad Soyad"), ("IP", "IP Adresi"),
-                          ("Durum", "Durum"), ("Bağlantı", "Bağlantı Zamanı"),
-                          ("Son İşlem", "Son Aktivite"), ("Teslim Dosyası", "Teslim Dosyası"),
-                          ("Teslim Zamanı", "Teslim Zamanı")]:
-            self.tree.heading(col, text=text)
-        
-        widths = [80, 140, 110, 90, 120, 220, 160, 110]
-        for col, width in zip(self.tree["columns"], widths):
-            self.tree.column(col, width=width)
-        
-        scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scrollbar.set)
-        
-        self.tree.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-    
-    def start_server(self):
-        """Sunucuyu başlat"""
+    def start_server(self) -> bool:
+        """Start the server socket"""
         try:
             self.server_socket = create_server_socket(HOST_IP, CONTROL_PORT, MAX_CONNECTIONS)
             logging.info(f"Sunucu başlatıldı: {HOST_IP}:{CONTROL_PORT}")
-            messagebox.showinfo("Sunucu Başlatıldı", 
-                              f"Sınav sunucusu başarıyla başlatıldı!\n\n"
-                              f"IP: {HOST_IP}\n"
-                              f"Control Port: {CONTROL_PORT}\n"
-                              f"Maksimum bağlantı: {MAX_CONNECTIONS}")
-            
+            self.server_running = True
             threading.Thread(target=self.accept_clients, daemon=True).start()
+            return True
         except Exception as e:
-            error_msg = f"Sunucu başlatılamadı: {e}\n\nMuhtemel nedenler:\n• Port {CONTROL_PORT} zaten kullanımda\n• Yönetici izni gerekli"
-            logging.error(error_msg)
-            messagebox.showerror("Sunucu Hatası", error_msg)
-            self.root.destroy()
-    
-    def update_connection_count(self):
-        """Bağlantı sayısını güncelle"""
-        if self.server_running:
-            count = len(connected_students)
-            self.connection_lbl.config(text=f"🌐 Bağlantı: {count} öğrenci")
-            self.root.after(5000, self.update_connection_count)
-    
-    def show_statistics(self):
-        """İstatistikleri göster"""
-        stats_window = tk.Toplevel(self.root)
-        stats_window.title("📊 Sınav İstatistikleri")
-        stats_window.geometry("500x400")
-        
-        stats_text = tk.Text(stats_window, wrap=tk.WORD, padx=10, pady=10)
-        stats_text.pack(fill=tk.BOTH, expand=True)
-        
-        total_students = len(load_students())
-        connected_count = len(connected_students)
-        start_time_display = self.start_time if self.start_time else "Henüz başlamadı"
-        
-        stats_content = f"""📊 SINAV SİSTEMİ İSTATİSTİKLERİ
-{'='*50}
-
-👥 Öğrenci Bilgileri:
-• Toplam kayıtlı öğrenci: {total_students}
-• Şu anda bağlı: {connected_count}
-• Bağlantı oranı: %{(connected_count/total_students*100) if total_students > 0 else 0:.1f}
-
-⏰ Sınav Durumu:
-• Sınav durumu: {'BAŞLADI' if self.exam_started else 'BAŞLAMADI'}
-• Kalan süre: {self.exam_time_remaining//60:02d}:{self.exam_time_remaining%60:02d}
-• Başlangıç zamanı: {start_time_display}
-
-📁 Dosya Durumu:
-• Soru dosyası sayısı: {len(os.listdir('Sorular')) if os.path.exists('Sorular') else 0}
-• Teslim edilen cevap: {len(os.listdir('Cevaplar')) if os.path.exists('Cevaplar') else 0}
-
-🔗 Bağlantı Detayları:"""
-        
-        for student_no, data in connected_students.items():
-            stats_content += f"\n• {student_no} ({data.get('name', 'Bilinmiyor')}) - {data['addr'][0]}"
-        
-        stats_text.insert(tk.END, stats_content)
-        stats_text.config(state=tk.DISABLED)
-    
-    def on_closing(self):
-        """Uygulama kapatılırken"""
-        if messagebox.askokcancel("Çıkış", "Sınav sunucusunu kapatmak istediğinizden emin misiniz?"):
-            self.server_running = False
-            logging.info("Sunucu kapatılıyor...")
-            
-            for student_no, data in connected_students.items():
-                try:
-                    data["conn"].send("CMD:MSG:Sunucu kapatılıyor. Lütfen çalışmanızı kaydedin!".encode(FORMAT))
-                except:
-                    pass
-            
-            try:
-                self.server_socket.close()
-            except:
-                pass
-            
-            self.root.destroy()
+            logging.error(f"Sunucu başlatılamadı: {e}")
+            return False
     
     def accept_clients(self):
-        """Yeni istemci bağlantılarını kabul et"""
+        """Accept new client connections"""
         while self.server_running:
             try:
                 conn, addr = self.server_socket.accept()
@@ -285,7 +149,7 @@ class TeacherServerGUI:
                 break
     
     def handle_client(self, conn, addr):
-        """İstemci bağlantısını yönet - uses ProtocolHandler"""
+        """Handle client connection - uses ProtocolHandler"""
         student_no = "Bilinmiyor"
         student_name = "Bilinmiyor"
         connection_time = datetime.now().strftime("%H:%M:%S")
@@ -296,7 +160,7 @@ class TeacherServerGUI:
         # Initialize protocol handler
         handler = ProtocolHandler(
             self.server_socket,
-            connected_students,
+            self.connected_students,
             log_student_activity,
             self.update_ui_list,
             lambda: self.exam_started,
@@ -325,28 +189,36 @@ class TeacherServerGUI:
                     
                     # Handle CMD: messages (not FTP commands)
                     if cmd.startswith("CMD:"):
-                        self._handle_cmd_message(cmd, conn, student_no)
+                        # These are handled separately
                         continue
                     
                     # Use protocol handler for FTP commands
-                    new_student_no, new_passive_socket, new_passive_port, should_break = handler.handle_command(
-                        cmd, parts, conn, addr, student_no, student_name, connection_time,
-                        pending_username, passive_data_socket, passive_data_port
-                    )
+                    try:
+                        new_student_no, new_passive_socket, new_passive_port, should_break = handler.handle_command(
+                            cmd, parts, conn, addr, student_no, student_name, connection_time,
+                            pending_username, passive_data_socket, passive_data_port
+                        )
+                    except (socket.error, OSError) as e:
+                        # Socket error - connection likely closed
+                        logging.warning(f"Socket hatası (bağlantı kapatılmış olabilir): {e}")
+                        break
+                    except Exception as e:
+                        logging.error(f"Komut işleme hatası: {e}")
+                        break
                     
                     # Update state based on command
                     if cmd == "USER":
-                        # USER command returns the username as new_student_no (for pending)
                         pending_username = new_student_no if new_student_no != "Bilinmiyor" else None
                     elif cmd == "PASS" or cmd == "LOGIN":
-                        # PASS/LOGIN updates student_no
                         if new_student_no != "Bilinmiyor":
                             student_no = new_student_no
                             pending_username = None
-                            if student_no in connected_students:
-                                student_name = connected_students[student_no].get("name", "Bilinmiyor")
+                            if student_no in self.connected_students:
+                                student_name = self.connected_students[student_no].get("name", "Bilinmiyor")
                         elif new_student_no == "Bilinmiyor" and student_no != "Bilinmiyor":
-                            # Login failed, reset
+                            # Login failed - clean up pending login
+                            if pending_username:
+                                ProtocolHandler._pending_logins.pop(pending_username, None)
                             pending_username = None
                     
                     passive_data_socket = new_passive_socket
@@ -370,114 +242,167 @@ class TeacherServerGUI:
             except: 
                 pass
                 
-            if student_no != "Bilinmiyor" and student_no in connected_students:
-                delivery_file = connected_students[student_no].get("delivery_file", "")
-                delivery_time = connected_students[student_no].get("delivery_time", "")
-                del connected_students[student_no]
-                self.update_ui_list(
-                    student_no, student_name, addr[0], "Çevrimdışı", connection_time,
-                    "Bağlantı Koptu", delivery_file, delivery_time
-                )
-                logging.info(f"Bağlantı kapatıldı: {student_no} ({addr[0]})")
+            # Clean up pending logins for pending_username (if login not completed)
+            if pending_username and pending_username != "Bilinmiyor":
+                ProtocolHandler._pending_logins.pop(pending_username, None)
+            
+            # Clean up connection - only remove if this is the current connection
+            if student_no != "Bilinmiyor" and student_no in self.connected_students:
+                # Verify this is the same connection before removing
+                stored_conn = self.connected_students[student_no].get("conn")
+                if stored_conn is conn:  # Only remove if it's the same connection
+                    delivery_file = self.connected_students[student_no].get("delivery_file", "")
+                    delivery_time = self.connected_students[student_no].get("delivery_time", "")
+                    del self.connected_students[student_no]
+                    self.update_ui_list(
+                        student_no, student_name, addr[0], "Çevrimdışı", connection_time,
+                        "Bağlantı Koptu", delivery_file, delivery_time
+                    )
+                    logging.info(f"Bağlantı kapatıldı: {student_no} ({addr[0]})")
+                    
+                    # Also clean up pending logins
+                    ProtocolHandler._pending_logins.pop(student_no, None)
+                else:
+                    # Different connection - don't remove (new connection replaced old one)
+                    logging.info(f"Bağlantı kapatıldı ama farklı bağlantı aktif: {student_no} ({addr[0]})")
     
-    def _handle_cmd_message(self, cmd: str, conn: socket.socket, student_no: str):
-        """Handle CMD: protocol messages (not FTP commands)"""
-        # These are handled separately as they're not part of FTP protocol
-        pass
+    def update_ui_list(self, no, name, ip, status, connection_time, action, delivery_file=None, delivery_time=None):
+        """Update UI list via callback"""
+        if self.ui_update_callback:
+            self.ui_update_callback(no, name, ip, status, connection_time, action, delivery_file, delivery_time)
     
-    def start_exam_timer(self):
-        """Sınav timer'ını başlat"""
-        mins = simpledialog.askinteger("Süre", "Sınav süresi kaç dakika?")
-        if mins:
+    def start_exam_timer(self, minutes: int) -> bool:
+        """Start exam timer"""
+        try:
             self.exam_started = True
-            self.exam_time_remaining = mins * 60
+            self.exam_time_remaining = minutes * 60
             self.start_time = datetime.now().strftime("%H:%M:%S")
             self.timer_running = True
-            self.status_lbl.config(text="Durum: SINAV BAŞLADI", fg="red")
             
-            total_seconds = mins * 60
-            for s_no, data in connected_students.items():
+            total_seconds = minutes * 60
+            for s_no, data in self.connected_students.items():
                 try: 
                     data["conn"].send(f"CMD:TIME_SECONDS:{total_seconds}\n".encode(FORMAT))
                 except: 
                     pass
             
-            self.update_server_timer()
+            # Start timer update loop
+            threading.Thread(target=self._timer_loop, daemon=True).start()
+            return True
+        except Exception as e:
+            logging.error(f"Sınav timer başlatma hatası: {e}")
+            return False
     
-    def update_server_timer(self):
-        """Sunucu timer'ını güncelle"""
-        if self.timer_running and self.exam_time_remaining > 0:
-            mins, secs = divmod(self.exam_time_remaining, 60)
-            self.timer_lbl.config(text=f"Süre: {mins:02}:{secs:02}", fg="red")
-            
+    def _timer_loop(self):
+        """Internal timer update loop"""
+        while self.timer_running and self.exam_time_remaining > 0:
             if self.exam_time_remaining % 30 == 0:
-                for s_no, data in connected_students.items():
+                for s_no, data in self.connected_students.items():
                     try: 
                         data["conn"].send(f"CMD:SYNC:{self.exam_time_remaining}\n".encode(FORMAT))
                     except: 
                         pass
             
+            time.sleep(1)
             self.exam_time_remaining -= 1
-            self.root.after(1000, self.update_server_timer)
-        elif self.timer_running and self.exam_time_remaining <= 0:
-            self.timer_lbl.config(text="Süre: 00:00", fg="red")
+        
+        if self.timer_running and self.exam_time_remaining <= 0:
             self.timer_running = False
-            messagebox.showinfo("Sınav Bitti", "Sınav süresi doldu!")
-            for s_no, data in connected_students.items():
+            self.exam_started = False  # Sınav bitti, girişleri aç
+            logging.info("Sınav süresi doldu - girişler açıldı")
+            for s_no, data in self.connected_students.items():
                 try: 
                     data["conn"].send("CMD:TIME_UP\n".encode(FORMAT))
                 except: 
                     pass
     
+    
     def unlock_entries(self):
-        """Girişleri aç"""
+
         self.exam_started = False
         self.timer_running = False
         self.exam_time_remaining = 0
-        self.status_lbl.config(text="Durum: Girişler AÇIK", fg="green")
-        self.timer_lbl.config(text="Süre: --:--", fg="blue")
     
-    def send_broadcast(self):
-        """Duyuru gönder"""
-        msg = simpledialog.askstring("Duyuru", "Mesaj:")
-        if msg:
-            for s_no, data in connected_students.items():
+    def send_broadcast(self, message: str):
+
+        for s_no, data in self.connected_students.items():
+            try: 
+                data["conn"].send(f"CMD:MSG:{message}\n".encode(FORMAT))
+            except: 
+                pass
+    
+    def get_connection_count(self) -> int:
+
+        return len(self.connected_students)
+    
+    def extend_exam_time(self, additional_minutes: int) -> bool:
+        """Extend exam time by additional minutes"""
+        if not self.exam_started or not self.timer_running:
+            return False
+        
+        try:
+            additional_seconds = additional_minutes * 60
+            self.exam_time_remaining += additional_seconds
+            
+            # Send new time to all connected students
+            for s_no, data in self.connected_students.items():
                 try: 
-                    data["conn"].send(f"CMD:MSG:{msg}\n".encode(FORMAT))
+                    data["conn"].send(f"CMD:SYNC:{self.exam_time_remaining}\n".encode(FORMAT))
                 except: 
                     pass
+            
+            logging.info(f"Sınav süresi {additional_minutes} dakika uzatıldı. Yeni süre: {self.exam_time_remaining // 60} dakika")
+            return True
+        except Exception as e:
+            logging.error(f"Süre uzatma hatası: {e}")
+            return False
     
-    def update_ui_list(self, no, name, ip, status, connection_time, action, delivery_file=None, delivery_time=None):
-        """UI listesini güncelle"""
-        self.root.after(0, lambda: self._update_tree_safe(no, name, ip, status, connection_time, action, delivery_file, delivery_time))
+    def get_exam_status(self) -> dict:
+        return {
+            "exam_started": self.exam_started,
+            "time_remaining": self.exam_time_remaining,
+            "timer_running": self.timer_running,
+            "start_time": getattr(self, 'start_time', None)
+        }
     
-    def _update_tree_safe(self, no, name, ip, status, connection_time, action, delivery_file=None, delivery_time=None):
-        """Thread-safe UI güncellemesi"""
-        str_no = str(no).strip()
-        found_item = None
+    def stop_server(self):
+        """Stop server and notify all clients"""
+        self.server_running = False
+        self.timer_running = False
         
-        for item in self.tree.get_children():
-            item_vals = self.tree.item(item)['values']
-            if len(item_vals) > 0 and str(item_vals[0]).strip() == str_no:
-                found_item = item
-                break
+        # Notify all clients that server is shutting down
+        for student_no, data in self.connected_students.items():
+            try:
+                # Send shutdown message first
+                data["conn"].send("CMD:MSG:Sunucu kapatılıyor. Lütfen çalışmanızı kaydedin!".encode(FORMAT))
+                # Send shutdown command to prevent reconnection attempts
+                data["conn"].send("CMD:SERVER_SHUTDOWN\n".encode(FORMAT))
+            except:
+                pass
         
-        if delivery_file is None and str_no in connected_students:
-            delivery_file = connected_students[str_no].get("delivery_file", "")
-        if delivery_time is None and str_no in connected_students:
-            delivery_time = connected_students[str_no].get("delivery_time", "")
+        # Close all client connections
+        for student_no, data in list(self.connected_students.items()):
+            try:
+                data["conn"].close()
+            except:
+                pass
         
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        action_with_time = f"[{timestamp}] {action}"
+        # Clear connected students
+        self.connected_students.clear()
         
-        values = (str_no, name, ip, status, connection_time, action_with_time, delivery_file or "", delivery_time or "")
+        # Close server socket
+        try:
+            if self.server_socket:
+                self.server_socket.close()
+        except:
+            pass
         
-        if found_item:
-            self.tree.item(found_item, values=values)
-        else:
-            self.tree.insert("", "end", values=values)
+        logging.info("Sunucu kapatıldı")
 
 if __name__ == "__main__":
+    # Import and run UI
+    from server_ui import TeacherServerGUI
+    import tkinter as tk
     root = tk.Tk()
     app = TeacherServerGUI(root)
     root.mainloop()

@@ -1,15 +1,10 @@
-"""
-Sınav Sistemi Konfigürasyon Yöneticisi
-Bu modül sistem ayarlarını yönetir ve varsayılan değerler sağlar.
-"""
-
 import json
 import os
 import logging
 from typing import Dict, Any, Optional
 
 class ConfigManager:
-    """Konfigürasyon yönetim sınıfı"""
+
     
     def __init__(self, config_file: str = "config.json"):
         self.config_file = config_file
@@ -31,7 +26,7 @@ class ConfigManager:
             return self._get_default_config()
     
     def _get_default_config(self) -> Dict[str, Any]:
-        """Varsayılan konfigürasyon değerleri"""
+
         return {
             "server": {
                 "host": "0.0.0.0",
@@ -39,7 +34,7 @@ class ConfigManager:
                 "data_port_min": 49152,
                 "data_port_max": 65535,
                 "max_connections": 50,
-                "buffer_size": 65536,  # 64KB for faster transfers (was 4KB)
+                "buffer_size": 65536,  
                 "heartbeat_interval": 30,
                 "connection_timeout": 300,
                 "max_file_size_mb": 50
@@ -81,10 +76,7 @@ class ConfigManager:
         }
     
     def get(self, key_path: str, default: Any = None) -> Any:
-        """
-        Nokta notasyonu ile konfigürasyon değeri al
-        Örnek: get("server.port") -> 2121
-        """
+
         try:
             keys = key_path.split('.')
             value = self.config

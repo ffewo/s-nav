@@ -2,20 +2,12 @@ import socket
 import threading
 import os
 import time
-import tkinter as tk
-from tkinter import messagebox, filedialog
-from tkinter import ttk
-import sys
 import logging
 import queue
+from typing import Tuple
 from datetime import datetime
 from config_manager import get_config
-from security_manager import SecurityManager
 from client_transfer import ClientTransferHandler
-try:
-    import winsound
-except ImportError:
-    winsound = None
 
 # Konfigürasyonu yükle
 config = get_config()
@@ -64,45 +56,50 @@ logging.info("Sınav sistemi client başlatıldı")
 logging.info(f"Log seviyesi: {log_level}")
 logging.info(f"Log dosyası: Logs/client.log")
 
-class SinavClientGUI:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Sınav Sistemi - Öğrenci")
-        width = config.get("ui.window_width", 600)
-        height = config.get("ui.window_height", 500)
-        self.root.geometry(f"{width}x{height}")
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close) 
-        self.app_running = True
-        banned_apps = config.get("security.banned_applications", 
-                                 ["chrome.exe", "firefox.exe", "msedge.exe", "opera.exe", "brave.exe"])
-        self.security_manager = SecurityManager(banned_apps)
-        self.security_manager.start_monitoring(lambda: self.app_running)
 
+class ClientCore:
+    
+    def __init__(self, ui_status_callback=None, ui_timer_callback=None, ui_message_callback=None, ui_exam_started_callback=None):
+
+        self.ui_status_callback = ui_status_callback
+        self.ui_timer_callback = ui_timer_callback
+        self.ui_message_callback = ui_message_callback
+        self.ui_exam_started_callback = ui_exam_started_callback
+        
+        # Load config
+        self.server_ip = config.get("client.server_ip", "127.0.0.1")
+        if os.path.exists("ip.txt"):
+            with open("ip.txt", "r") as f:
+                ip_from_file = f.read().strip()
+                if ip_from_file:
+                    self.server_ip = ip_from_file
+        
+        self.control_port = config.get("server.port", 2121)
+        self.buffer_size = config.get("server.buffer_size", 4096)
+        self.format = "utf-8"
+        self.reconnect_attempts_max = config.get("client.reconnect_attempts", 5)
+        self.reconnect_delay = config.get("client.reconnect_delay", 3)
+        
         self.control_socket = None
         self.is_connected = False
         self.student_no = ""
         self.exam_started = False
         self.reconnect_attempts = 0
         self.last_heartbeat = time.time()
-        # Upload progress UI state
-        self.upload_progress_window = None
-        self.upload_progress_var = tk.DoubleVar(value=0.0)
-        self.upload_progress_label = None
-        # Sınav süresi uyarıları için state
-        self.one_minute_warned = False
-        self.time_up_shutdown_called = False  # Sınav bitiş bildirimi için flag
-        # READY mesajı için queue 
         self.ready_queue = queue.Queue()
-        
-        logging.info("Sınav sistemi başlatıldı")
-        # Initialize transfer handler (will be set after connection)
+        self.login_response_queue = queue.Queue()  # Queue for login responses
         self.transfer_handler = None
-        self.setup_login_ui()
-        self.connect_to_server()
-
-    def connect_to_server(self):
-        """Sunucuya bağlanma"""
-        for attempt in range(RECONNECT_ATTEMPTS):
+        self.app_running = True
+        
+        # Exam timer state
+        self.one_minute_warned = False
+        self.time_up_shutdown_called = False
+        self.exam_time_remaining = 0
+        self.current_timer = None  # Track current timer to cancel if needed
+    
+    def connect_to_server(self) -> bool:
+        """Connect to server with improved error handling"""
+        for attempt in range(self.reconnect_attempts_max):
             try:
                 if self.control_socket:
                     try:
@@ -110,56 +107,96 @@ class SinavClientGUI:
                     except:
                         pass
                 
-                self.control_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self.control_socket.settimeout(10)  # 10 saniye timeout
-                self.control_socket.connect((SERVER_IP, CONTROL_PORT))
+                # Validate IP address
+                try:
+                    socket.inet_aton(self.server_ip)
+                except socket.error:
+                    error_msg = f"Geçersiz IP adresi: {self.server_ip}"
+                    logging.error(error_msg)
+                    if self.ui_message_callback:
+                        self.ui_message_callback(
+                            f"{error_msg}\n\n"
+                            f"Lütfen 'ip.txt' dosyasında veya config.json'da geçerli bir IP adresi girin.\n"
+                            f"Örnek: 192.168.1.100 veya 127.0.0.1",
+                            "IP Adresi Hatası",
+                            "error"
+                        )
+                    return False
                 
-                welcome_msg = self.control_socket.recv(BUFFER_SIZE).decode(FORMAT)
-                logging.info(f"Sunucuya bağlandı: {welcome_msg.strip()}")
+                # Create socket and connect
+                self.control_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.control_socket.settimeout(10)
+                
+                logging.info(f"Sunucuya bağlanılıyor: {self.server_ip}:{self.control_port} (deneme {attempt + 1}/{self.reconnect_attempts_max})")
+                
+                try:
+                    self.control_socket.connect((self.server_ip, self.control_port))
+                except socket.timeout:
+                    raise Exception(f"Bağlantı zaman aşımı - sunucu {self.server_ip}:{self.control_port} yanıt vermiyor")
+                except ConnectionRefusedError:
+                    raise Exception(f"Bağlantı reddedildi - sunucu {self.server_ip}:{self.control_port} çalışmıyor olabilir")
+                except OSError as e:
+                    if e.errno == 10051:  # Windows: Network is unreachable
+                        raise Exception(f"Ağ erişilemiyor - {self.server_ip} adresine ulaşılamıyor")
+                    elif e.errno == 10049:  # Windows: Address not available
+                        raise Exception(f"IP adresi kullanılamıyor - {self.server_ip} geçersiz olabilir")
+                    else:
+                        raise Exception(f"Ağ hatası: {str(e)}")
+                
+                # Receive welcome message
+                try:
+                    self.control_socket.settimeout(5)
+                    welcome_msg = self.control_socket.recv(self.buffer_size).decode(self.format)
+                    logging.info(f"Sunucuya bağlandı: {welcome_msg.strip()}")
+                except socket.timeout:
+                    raise Exception("Sunucu bağlantı kuruldu ancak hoş geldin mesajı alınamadı")
                 
                 self.is_connected = True
                 self.reconnect_attempts = 0
                 self.last_heartbeat = time.time()
                 
                 # Initialize transfer handler
-                self.transfer_handler = ClientTransferHandler(self.control_socket, SERVER_IP, BUFFER_SIZE)
+                self.transfer_handler = ClientTransferHandler(self.control_socket, self.server_ip, self.buffer_size)
                 
-                if hasattr(self, 'status_label'): 
-                    self.status_label.config(text="Sunucuya Bağlandı ✓", fg="green")
+                if self.ui_status_callback:
+                    self.ui_status_callback("Sunucuya Bağlandı ✓", "green")
                 
-                # Heartbeat başlat
+                # Start heartbeat
                 threading.Thread(target=self.heartbeat_monitor, daemon=True).start()
                 return True
                 
             except Exception as e:
-                logging.warning(f"Bağlantı denemesi {attempt + 1}/{RECONNECT_ATTEMPTS} başarısız: {e}")
-                if hasattr(self, 'status_label'):
-                    self.status_label.config(text=f"Bağlantı denemesi {attempt + 1}/{RECONNECT_ATTEMPTS}...", fg="orange")
+                error_detail = str(e)
+                logging.warning(f"Bağlantı denemesi {attempt + 1}/{self.reconnect_attempts_max} başarısız: {error_detail}")
+                if self.ui_status_callback:
+                    self.ui_status_callback(f"Bağlantı denemesi {attempt + 1}/{self.reconnect_attempts_max}...", "orange")
                 
-                if attempt < RECONNECT_ATTEMPTS - 1:
-                    time.sleep(RECONNECT_DELAY)
+                if attempt < self.reconnect_attempts_max - 1:
+                    time.sleep(self.reconnect_delay)
         
-        # Tüm denemeler başarısız
-        logging.error("Sunucuya bağlanılamadı - tüm denemeler başarısız")
-        messagebox.showerror("Bağlantı Hatası", 
-                           f"Sunucuya bağlanılamadı!\n\n"
-                           f"Sunucu IP: {SERVER_IP}:{CONTROL_PORT}\n"
-                           f"Lütfen:\n"
-                           f"• Sunucunun çalıştığından emin olun\n"
-                           f"• Ağ bağlantınızı kontrol edin\n"
-                           f"• IP adresinin doğru olduğunu kontrol edin")
-        self.root.destroy()
-        sys.exit()
+        # All attempts failed
+        logging.error(f"Sunucuya bağlanılamadı - tüm denemeler başarısız: {self.server_ip}:{self.control_port}")
+        if self.ui_message_callback:
+            self.ui_message_callback(
+                f"Sunucuya bağlanılamadı!\n\n"
+                f"Sunucu: {self.server_ip}:{self.control_port}\n\n"
+                f"Lütfen kontrol edin:\n"
+                f"• Sunucu çalışıyor mu? (server.py çalıştırıldı mı?)\n"
+                f"• IP adresi doğru mu? (ip.txt veya config.json)\n"
+                f"• Port doğru mu? (varsayılan: 2121)\n"
+                f"• Firewall sunucu portunu engelliyor mu?\n"
+                f"• Aynı ağda mısınız? (farklı ağdaysa router ayarları gerekebilir)\n\n"
+                f"İpucu: Sunucu IP'sini öğrenmek için sunucu bilgisayarda 'ipconfig' komutunu çalıştırın.",
+                "Bağlantı Hatası",
+                "error"
+            )
         return False
-
     
     def heartbeat_monitor(self):
-        """Sunucu bağlantısını kontrol eden heartbeat"""
         while self.app_running and self.is_connected:
             try:
-                # Her 30 saniyede bir ping gönder
                 if time.time() - self.last_heartbeat > 30:
-                    self.control_socket.send("PING".encode(FORMAT))
+                    self.control_socket.send("PING".encode(self.format))
                     self.last_heartbeat = time.time()
                 time.sleep(10)
             except Exception as e:
@@ -168,86 +205,36 @@ class SinavClientGUI:
                 break
     
     def handle_connection_lost(self):
-        """Bağlantı koptuğunda yeniden bağlanmaya çalış"""
         if not self.app_running:
             return
-            
+        
         self.is_connected = False
         logging.warning("Sunucu bağlantısı koptu, yeniden bağlanmaya çalışılıyor...")
         
-        if hasattr(self, 'status_label'):
-            self.status_label.config(text="Bağlantı koptu, yeniden bağlanıyor...", fg="red")
+        if self.ui_status_callback:
+            self.ui_status_callback("Bağlantı koptu, yeniden bağlanıyor...", "red")
         
-        # Yeniden bağlanmaya çalış
         if self.connect_to_server():
-            # Başarılı bağlantı sonrası listener'ı yeniden başlat
-            if hasattr(self, 'file_listbox'):
-                threading.Thread(target=self.server_listener, daemon=True).start()
-
-    def setup_login_ui(self):
-        for w in self.root.winfo_children(): w.destroy()
-        f = tk.Frame(self.root, padx=20, pady=20)
-        f.place(relx=0.5, rely=0.5, anchor="center")
-        
-        tk.Label(f, text="ÖĞRENCİ GİRİŞİ", font=("Arial", 16)).pack(pady=10)
-        tk.Label(f, text="Numara:").pack(anchor="w")
-        self.entry_no = tk.Entry(f, width=30); self.entry_no.pack(pady=5)
-        tk.Label(f, text="Şifre:").pack(anchor="w")
-        self.entry_pw = tk.Entry(f, width=30, show="*"); self.entry_pw.pack(pady=5)
-        self.status_label = tk.Label(f, text="Bağlanıyor...", fg="grey"); self.status_label.pack()
-        tk.Button(f, text="GİRİŞ", command=self.handle_login, bg="#4CAF50", fg="white", width=20).pack(pady=10)
-
-    def setup_main_ui(self):
-        for w in self.root.winfo_children(): w.destroy()
-        
-        info_frame = tk.Frame(self.root, bg="#eee", pady=10)
-        info_frame.pack(fill="x")
-        tk.Label(info_frame, text=f"Öğrenci: {self.student_no}", font=("Arial", 12, "bold"), bg="#eee").pack(side="left", padx=10)
-        self.timer_label = tk.Label(info_frame, text="Süre: Bekliyor...", font=("Arial", 14, "bold"), fg="blue", bg="#eee")
-        self.timer_label.pack(side="right", padx=10)
-
-        tk.Label(self.root, text="SINAV DOSYALARI", font=("Arial", 10)).pack(pady=5)
-        
-        list_frame = tk.Frame(self.root)
-        list_frame.pack(fill="both", expand=True, padx=20, pady=5)
-        
-        self.file_listbox = tk.Listbox(list_frame, height=15)
-        self.file_listbox.pack(side="left", fill="both", expand=True)
-        
-        btn_frame = tk.Frame(self.root, pady=10)
-        btn_frame.pack(fill="x", padx=20)
-
-        tk.Button(btn_frame, text="Listeyi Yenile", command=self.refresh_list).pack(side="left", padx=5)
-        tk.Button(btn_frame, text="Seçili Dosyayı İNDİR", command=self.download_and_open, bg="#2196F3", fg="white").pack(side="left", padx=5)
-        
-        # UPLOAD BUTONU (Başlangıçta KAPALI)
-        self.upload_btn = tk.Button(btn_frame, text="DOSYA YÜKLE / TESLİM ET", command=self.select_and_upload, bg="#FF5722", fg="white", height=2)
-        self.upload_btn.pack(side="right", padx=5)
-        self.upload_btn.config(state="disabled", bg="gray", text="SINAVIN BAŞLAMASINI BEKLEYİN")
-
-        self.start_listener()
-        self.refresh_list()
-
-    def start_listener(self):
-        threading.Thread(target=self.server_listener, daemon=True).start()
-
+            # Restart listener if needed
+            threading.Thread(target=self.server_listener, daemon=True).start()
+    
     def server_listener(self):
-        """Sunucudan gelen komutları dinleme - uses command dispatcher"""
-        # Command dispatcher dictionary
+        """Listen for server commands"""
         cmd_handlers = {
             "CMD:MSG:": self._handle_cmd_msg,
             "CMD:TIME_SECONDS:": self._handle_cmd_time_seconds,
             "CMD:SYNC:": self._handle_cmd_sync,
             "CMD:TIME_UP": self._handle_cmd_time_up,
-            "PONG": lambda d: None,  # Heartbeat response
+            "CMD:SERVER_SHUTDOWN": self._handle_server_shutdown,
+            "PONG": lambda d: None,
         }
         
         while self.app_running and self.is_connected:
             try:
                 self.control_socket.settimeout(1.0)
-                raw_data = self.control_socket.recv(BUFFER_SIZE).decode(FORMAT)
+                raw_data = self.control_socket.recv(self.buffer_size).decode(self.format)
                 
-                if not raw_data: 
+                if not raw_data:
                     logging.warning("Sunucudan boş veri geldi, bağlantı kopmuş olabilir")
                     self.handle_connection_lost()
                     break
@@ -257,21 +244,29 @@ class SinavClientGUI:
                 
                 for data in commands:
                     data = data.strip()
-                    if not data: 
+                    if not data:
                         continue
                     
-                    # Queue 227 and READY messages for transfer threads
+                    # Queue 227 and READY messages
                     if data.startswith("227") or data.startswith("READY"):
-                        logging.info(f"{data[:5]} mesajı server_listener tarafından yakalandı ve queue'ya eklendi: {data}")
                         try:
                             self.ready_queue.put_nowait(data)
                         except queue.Full:
-                            logging.warning(f"{data[:5]} queue dolu, eski mesaj atlanıyor")
+                            logging.warning(f"Queue dolu, mesaj atlanıyor: {data[:5]}")
+                        continue
+                    
+                    # Queue login responses (331, 230, 530, 550)
+                    if data.startswith("331") or data.startswith("230") or data.startswith("530") or (data.startswith("550") and ("SINAV_BASLADI" in data or "ZATEN_BAGLI" in data)):
+                        try:
+                            logging.debug(f"Login yanıtı queue'ya ekleniyor: {data[:50]}")
+                            self.login_response_queue.put_nowait(data)
+                            logging.debug(f"Login yanıtı queue'ya eklendi: {data[:50]}")
+                        except queue.Full:
+                            logging.warning(f"Login queue dolu, mesaj atlanıyor: {data[:5]}")
                         continue
                     
                     logging.info(f"Sunucudan komut alındı: {data}")
                     
-                    # Use command dispatcher
                     handled = False
                     for cmd_prefix, handler in cmd_handlers.items():
                         if data.startswith(cmd_prefix):
@@ -280,429 +275,362 @@ class SinavClientGUI:
                             break
                     
                     if not handled:
-                        logging.debug(f"Komut işlenmedi (bilinmeyen): {data}")
+                        logging.debug(f"Komut işlenmedi: {data}")
                         
             except socket.timeout:
                 continue
+            except (ConnectionResetError, ConnectionAbortedError, OSError) as e:
+                # Server closed connection
+                logging.warning(f"Sunucu bağlantısı kapatıldı: {e}")
+                if self.app_running:
+                    self.handle_connection_lost()
+                break
             except Exception as e:
                 logging.error(f"Server listener hatası: {e}")
-                self.handle_connection_lost()
+                if self.app_running:
+                    self.handle_connection_lost()
                 break
     
     def _handle_cmd_msg(self, data: str):
-        """Handle CMD:MSG: command"""
         msg = data.split("CMD:MSG:", 1)[1]
-        self.root.after(0, lambda m=msg: messagebox.showinfo("DUYURU", m))
+        if self.ui_message_callback:
+            self.ui_message_callback(msg, "DUYURU", "info")
     
     def _handle_cmd_time_seconds(self, data: str):
-        """Handle CMD:TIME_SECONDS: command"""
         try:
             seconds = int(data.split(":")[2])
-            self.root.after(0, self.activate_exam_mode)
-            self.root.after(0, lambda s=seconds: self.start_countdown(s))
+            self.activate_exam_mode()
+            self.start_countdown(seconds)
         except (ValueError, IndexError) as e:
             logging.error(f"Zaman parse hatası: {e}")
     
     def _handle_cmd_sync(self, data: str):
-        """Handle CMD:SYNC: command"""
         try:
             server_time = int(data.split(":")[2])
-            self.root.after(0, self.activate_exam_mode)
-            self.root.after(0, lambda s=server_time: self.start_countdown(s))
+            self.activate_exam_mode()
+            self.start_countdown(server_time)
         except (ValueError, IndexError) as e:
             logging.error(f"Sync parse hatası: {e}")
     
     def _handle_cmd_time_up(self, data: str):
         """Handle CMD:TIME_UP command"""
         if not self.time_up_shutdown_called:
-            self.root.after(0, self.time_up_shutdown)
-
-    def start_countdown(self, seconds):
-        if seconds >= 0:
-            mins, secs = divmod(seconds, 60)
-            color = "red" if seconds <= 300 else "orange" if seconds <= 600 else "green"
-            self.timer_label.config(text=f"Süre: {mins:02}:{secs:02}", fg=color)
-            
-            # Sınavın bitmesine 1 dakika kala popup + ses uyarısı (her sınavda sadece 1 kez)
-            if seconds == 60 and not self.one_minute_warned:
-                self.one_minute_warned = True
-                self.root.after(0, self.show_one_minute_warning)
-            
-            if self.app_running:
-                self.root.after(1000, lambda: self.start_countdown(seconds - 1))
-        else:
-            # Sınav süresi doldu
-            if not self.time_up_shutdown_called:
-                self.time_up_shutdown()
-
-    def show_one_minute_warning(self):
-        """Sınav bitimine 1 dakika kala uyarı ve ses"""
-        try:
-            if winsound:
-                # Basit uyarı sesi (Windows'ta çalışır)
-                winsound.Beep(1000, 700)
-        except Exception as e:
-            logging.error(f"Ses çalma hatası: {e}")
-        try:
-            messagebox.showwarning("Süre Uyarısı", "Sınavın bitmesine 1 dakika kaldı!")
-        except Exception as e:
-            logging.error(f"Uyarı penceresi gösterilemedi: {e}")
-
+            self.time_up_shutdown()
+    
+    def _handle_server_shutdown(self, data: str):
+        """Handle CMD:SERVER_SHUTDOWN command - server is closing"""
+        logging.info("Sunucu kapatılıyor - yeniden bağlanma denemeleri durduruluyor")
+        self.is_connected = False
+        self.app_running = False  # Stop all operations
+        
+        if self.ui_message_callback:
+            self.ui_message_callback(
+                "Sunucu kapatıldı.\n\n"
+                "Bağlantı kesildi ve yeniden bağlanma denemeleri durduruldu.\n\n"
+                "Lütfen öğretmeninizle iletişime geçin.",
+                "Sunucu Kapatıldı",
+                "warning"
+            )
+        
+        if self.ui_status_callback:
+            self.ui_status_callback("Sunucu Kapatıldı", "red")
+    
     def activate_exam_mode(self):
-        """Sınav modunu aktif et - buton ve durumu güncelle"""
         if not self.exam_started:
             self.exam_started = True
-            # Yeni sınav başlarken 1 dakika uyarı durumunu sıfırla
             self.one_minute_warned = False
-            # Sınav bitiş flag'ini de sıfırla (yeni sınav için)
             self.time_up_shutdown_called = False
-            try:
-                self.upload_btn.config(state="normal", bg="#FF5722", text="DOSYA YÜKLE / TESLİM ET")
-            except Exception as e:
-                print(f"Button activation error: {e}")
-
-    def handle_login(self):
-        """Kullanıcı girişi işlemi"""
-        no = self.entry_no.get().strip()
-        pw = self.entry_pw.get().strip()
-
-        # 1. Temel Kontroller (Validation)
-        if not no or not pw:
-            messagebox.showwarning("Uyarı", "Geçerli bir öğrenci numarası ve şifre giriniz!")
-            return
-        
-        if not no.isdigit():
-            messagebox.showwarning("Uyarı", "Öğrenci numarası sadece rakamlardan oluşmalıdır!")
-            return
-        
-        if not self.is_connected:
-            messagebox.showerror("Hata", "Sunucuya bağlı değilsiniz!")
-            return
-
-        try:
-            # 2. Komut Gönderme Yardımcısı (İç fonksiyon)
-            def send_and_get(cmd):
-                self.control_socket.send(f"{cmd}\n".encode(FORMAT))
-                self.control_socket.settimeout(10.0)
-                return self.control_socket.recv(BUFFER_SIZE).decode(FORMAT).strip()
-
-            # 3. USER ve PASS Süreci
-            resp_user = send_and_get(f"USER {no}")
-            logging.info(f"USER {no} -> {resp_user}")
-
-            if "331" in resp_user:  # Şifre bekliyor
-                resp_pass = send_and_get(f"PASS {pw}")
-                logging.info(f"PASS -> {resp_pass}")
-                resp = resp_pass
-            else:
-                resp = resp_user
-
-            # 4. Yanıt Analizi (Tek merkezden kontrol)
-            if "230" in resp:  # Başarılı
-                self.student_no = no
-                logging.info(f"Başarılı giriş: {no}")
-                messagebox.showinfo("Başarılı", f"Hoşgeldiniz {no}!\n\nSınav sistemi hazırlanıyor...")
-                self.setup_main_ui()
-            elif "550" in resp:  # Sınav başladı engeli
-                messagebox.showerror("Giriş Yasak", 
-                                   "Sınav başladıktan sonra giriş yapamazsınız!\n\n"
-                                   "Lütfen öğretmeninizle iletişime geçin.")
-                logging.warning(f"Sınav sırasında giriş denemesi: {no}")
-                self.root.destroy()
-                sys.exit()
-            elif "530" in resp:  # Hatalı bilgi
-                messagebox.showerror("Giriş Hatası", 
-                                   "Yanlış öğrenci numarası veya şifre!\n\n"
-                                   "Lütfen bilgilerinizi kontrol edin.")
-                self.entry_pw.delete(0, 'end')  # Şifreyi temizle
-                self.entry_pw.focus()  # Şifre alanına odaklan
-                logging.warning(f"Yanlış giriş denemesi: {no}")
-            else:
-                messagebox.showerror("Hata", f"Bilinmeyen giriş hatası!\n\nSunucu yanıtı: {resp}")
-                logging.error(f"Bilinmeyen giriş yanıtı: {resp}")
-
-        except socket.timeout:
-            messagebox.showerror("Zaman Aşımı", "Giriş işlemi zaman aşımına uğradı!\nLütfen tekrar deneyin.")
-            logging.error("Giriş zaman aşımı")
-        except Exception as e:
-            messagebox.showerror("Bağlantı Hatası", 
-                               f"Sunucuyla iletişim kurulamadı!\n\nHata: {str(e)}")
-            logging.error(f"Giriş hatası: {e}")
-            self.handle_connection_lost()
-
-    def refresh_list(self):
-        threading.Thread(target=self._refresh_thread, daemon=True).start()
+            # Notify UI to enable upload button
+            if self.ui_exam_started_callback:
+                self.ui_exam_started_callback()
     
-    def _refresh_thread(self):
-        """Dosya listesini yenileme thread'i"""
-        if not self.is_connected:
-            logging.warning("Bağlantı yok, liste yenilenemedi")
+    def start_countdown(self, seconds: int):
+        """Start countdown timer"""
+        # Cancel existing timer if any (for time extension)
+        if self.current_timer:
+            try:
+                self.current_timer.cancel()
+            except:
+                pass
+            self.current_timer = None
+        
+        self.exam_time_remaining = seconds
+        
+        # Update UI immediately
+        if self.ui_timer_callback:
+            mins, secs = divmod(seconds, 60)
+            color = "red" if seconds <= 300 else "orange" if seconds <= 600 else "green"
+            self.ui_timer_callback(seconds, color)
+        
+        # One minute warning (reset if time extended)
+        if seconds > 60:
+            self.one_minute_warned = False
+        elif seconds == 60 and not self.one_minute_warned:
+            self.one_minute_warned = True
+            if self.ui_message_callback:
+                self.ui_message_callback("Sınavın bitmesine 1 dakika kaldı!", "Süre Uyarısı", "warning")
+        
+        # If time is up, call shutdown
+        if seconds <= 0:
+            if not self.time_up_shutdown_called:
+                self.time_up_shutdown()
             return
-            
+        
+        # Schedule next update (only if seconds > 0)
+        if self.app_running and seconds > 0:
+            self.current_timer = threading.Timer(1.0, lambda: self.start_countdown(seconds - 1))
+            self.current_timer.start()
+    
+    def time_up_shutdown(self):
+        """Handle time up"""
+        if self.time_up_shutdown_called:
+            return
+        self.time_up_shutdown_called = True
+        logging.info("Sınav süresi doldu - sistem kapatılıyor")
+        if self.ui_message_callback:
+            self.ui_message_callback("Sınav süresi doldu! Sistem kapatılıyor.", "SÜRE BİTTİ", "warning")
+    
+    def login(self, student_no: str, password: str) -> bool:
+        """Login to server with retry mechanism"""
+        if not self.is_connected:
+            if self.ui_message_callback:
+                self.ui_message_callback("Sunucuya bağlı değilsiniz!", "Hata", "error")
+            return False
+        
+        max_retries = 3
+        retry_delay = 1.0
+        
+        for attempt in range(max_retries):
+            try:
+                # Clear any old login responses from queue
+                while not self.login_response_queue.empty():
+                    try:
+                        self.login_response_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                
+                # Send USER command
+                self.control_socket.send(f"USER {student_no}\n".encode(self.format))
+                logging.info(f"USER {student_no} gönderildi")
+                
+                # Wait for response from queue (handled by server_listener)
+                try:
+                    resp_user = self.login_response_queue.get(timeout=15.0)
+                    logging.info(f"USER {student_no} -> {resp_user}")
+                except queue.Empty:
+                    logging.warning(f"USER yanıtı zaman aşımı (deneme {attempt + 1}/{max_retries})")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        if self.ui_message_callback:
+                            self.ui_message_callback(
+                                "Giriş işlemi zaman aşımına uğradı!\n\n"
+                                f"{max_retries} deneme yapıldı ancak sunucu yanıt vermedi.\n"
+                                "Lütfen:\n"
+                                "• İnternet bağlantınızı kontrol edin\n"
+                                "• Sunucunun çalıştığından emin olun\n"
+                                "• Tekrar deneyin",
+                                "Zaman Aşımı",
+                                "error"
+                            )
+                        return False
+                
+                # Check if USER command was rejected (550 ZATEN_BAGLI)
+                if "550" in resp_user and "ZATEN_BAGLI" in resp_user:
+                    logging.warning(f"USER komutu reddedildi - zaten giriş yapılmış: {student_no}")
+                    if self.ui_message_callback:
+                        self.ui_message_callback(
+                            f"Giriş yapılamadı!\n\n"
+                            f"Bu öğrenci numarası ({student_no}) ile zaten giriş yapılmış.\n\n"
+                            "Aynı anda sadece bir yerden giriş yapabilirsiniz.\n"
+                            "Lütfen diğer cihazdan çıkış yapın veya bekleyin.",
+                            "Giriş Reddedildi",
+                            "error"
+                        )
+                    return False
+                
+                if "331" in resp_user:
+                    # Server expects password
+                    self.control_socket.send(f"PASS {password}\n".encode(self.format))
+                    logging.info(f"PASS gönderildi")
+                    
+                    # Wait for password response
+                    try:
+                        resp_pass = self.login_response_queue.get(timeout=15.0)
+                        logging.info(f"PASS -> {resp_pass}")
+                        resp = resp_pass
+                    except queue.Empty:
+                        logging.warning(f"PASS yanıtı zaman aşımı (deneme {attempt + 1}/{max_retries})")
+                        if attempt < max_retries - 1:
+                            time.sleep(retry_delay)
+                            continue
+                        else:
+                            if self.ui_message_callback:
+                                self.ui_message_callback(
+                                    "Giriş işlemi zaman aşımına uğradı!\n\n"
+                                    f"{max_retries} deneme yapıldı ancak sunucu yanıt vermedi.",
+                                    "Zaman Aşımı",
+                                    "error"
+                                )
+                            return False
+                else:
+                    resp = resp_user
+                
+                # Process response
+                if "230" in resp:
+                    self.student_no = student_no
+                    logging.info(f"Başarılı giriş: {student_no}")
+                    if self.ui_message_callback:
+                        self.ui_message_callback(f"Hoşgeldiniz {student_no}!\n\nSınav sistemi hazırlanıyor...", "Başarılı", "info")
+                    return True
+                elif "550" in resp:
+                    if "ZATEN_BAGLI" in resp:
+                        # Already logged in - REJECT login attempt
+                        logging.warning(f"Zaten giriş yapılmış - giriş reddedildi: {student_no}")
+                        if self.ui_message_callback:
+                            self.ui_message_callback(
+                                f"Giriş yapılamadı!\n\n"
+                                f"Bu öğrenci numarası ({student_no}) ile zaten giriş yapılmış.\n\n"
+                                "Aynı anda sadece bir yerden giriş yapabilirsiniz.\n"
+                                "Lütfen diğer cihazdan çıkış yapın veya bekleyin.",
+                                "Giriş Reddedildi",
+                                "error"
+                            )
+                        return False
+                    elif "SINAV_BASLADI" in resp:
+                        if self.ui_message_callback:
+                            self.ui_message_callback(
+                                "Sınav başladıktan sonra giriş yapamazsınız!\n\nLütfen öğretmeninizle iletişime geçin.",
+                                "Giriş Yasak",
+                                "error"
+                            )
+                        return False
+                    else:
+                        if self.ui_message_callback:
+                            self.ui_message_callback(f"Giriş hatası!\n\nSunucu yanıtı: {resp}", "Hata", "error")
+                        return False
+                elif "530" in resp:
+                    if attempt < max_retries - 1:
+                        logging.warning(f"Yanlış şifre (deneme {attempt + 1}/{max_retries}), tekrar deneniyor...")
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        if self.ui_message_callback:
+                            self.ui_message_callback(
+                                "Yanlış öğrenci numarası veya şifre!\n\nLütfen bilgilerinizi kontrol edin.",
+                                "Giriş Hatası",
+                                "error"
+                            )
+                        return False
+                else:
+                    if self.ui_message_callback:
+                        self.ui_message_callback(f"Bilinmeyen giriş hatası!\n\nSunucu yanıtı: {resp}", "Hata", "error")
+                    return False
+                    
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logging.warning(f"Giriş hatası (deneme {attempt + 1}/{max_retries}): {e}, tekrar deneniyor...")
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    if self.ui_message_callback:
+                        self.ui_message_callback(
+                            f"Sunucuyla iletişim kurulamadı!\n\n"
+                            f"Hata: {str(e)}\n\n"
+                            f"{max_retries} deneme yapıldı ancak başarısız oldu.",
+                            "Bağlantı Hatası",
+                            "error"
+                        )
+                    logging.error(f"Giriş hatası - {max_retries} deneme başarısız: {e}")
+                    return False
+        
+        return False
+    
+    def get_file_list(self) -> list:
+        if not self.is_connected:
+            return []
+        
         try:
-            self.control_socket.send("LIST".encode(FORMAT))
+            self.control_socket.send("LIST".encode(self.format))
             self.control_socket.settimeout(5.0)
-            raw_data = self.control_socket.recv(BUFFER_SIZE).decode(FORMAT)
-            
-            logging.info(f"Liste yanıtı: {raw_data.strip()}")
+            raw_data = self.control_socket.recv(self.buffer_size).decode(self.format)
             
             for part in raw_data.split("\n"):
                 if part.startswith("DATA_LIST:"):
                     files_str = part.split(":", 1)[1] if ":" in part else ""
                     files = [f.strip() for f in files_str.split(",") if f.strip()]
-                    self.root.after(0, lambda f=files: self._update_list(f))
-                    break
-        except socket.timeout:
-            logging.warning("Liste alma zaman aşımı")
-            self.root.after(0, lambda: messagebox.showwarning("Uyarı", "Dosya listesi alınamadı (Zaman aşımı)"))
+                    return files
+            return []
         except Exception as e:
-            logging.error(f"Liste yenileme hatası: {e}")
-            self.handle_connection_lost()
-
-    def _update_list(self, files):
-        self.file_listbox.delete(0, tk.END)
-        for f in files: 
-            if f: self.file_listbox.insert(tk.END, f)
-
-    def download_and_open(self):
-        # Check if exam has started
-        if not self.exam_started:
-            messagebox.showwarning("Uyarı", "Sınav henüz başlamadı! Dosya indiremezsiniz.")
-            return
-            
-        selection = self.file_listbox.curselection()
-        if not selection: 
-            messagebox.showwarning("Uyarı", "Dosya seçmediniz.")
-            return
-        filename = self.file_listbox.get(selection[0])
-        threading.Thread(target=self._download_thread, args=(filename,), daemon=True).start()
-
-    def _download_thread(self, filename):
-        """Dosya indirme thread'i - uses ClientTransferHandler"""
+            logging.error(f"Liste alma hatası: {e}")
+            return []
+    
+    def download_file(self, filename: str, save_path: str) -> Tuple[bool, int]:
         if not self.is_connected or not self.transfer_handler:
-            self.root.after(0, lambda: messagebox.showerror("Hata", "Sunucuya bağlı değilsiniz!"))
-            return
+            return False, 0
         
         if not self.exam_started:
-            self.root.after(0, lambda: messagebox.showwarning("Uyarı", "Sınav henüz başlamadı! Dosya indiremezsiniz."))
-            return
-            
+            return False, 0
+        
         try:
             logging.info(f"Dosya indiriliyor: {filename}")
-            self.control_socket.send(f"RETR {filename}".encode(FORMAT))
+            self.control_socket.send(f"RETR {filename}".encode(self.format))
             
-            # Use transfer handler for download
-            save_path = os.path.join(os.getcwd(), filename)
             success, received = self.transfer_handler.download_file(filename, save_path, self.ready_queue)
-            
-            if success:
-                self.root.after(0, lambda: messagebox.showinfo("Başarılı", 
-                                                              f"{filename} başarıyla indirildi!\n\n"
-                                                              f"Dosya çalışma dizinine kaydedildi:\n{save_path}"))
-                logging.info(f"Dosya başarıyla indirildi: {filename} ({received} bytes) -> {save_path}")
-            else:
-                self.root.after(0, lambda: messagebox.showerror("İndirme Hatası", 
-                                                                 "Dosya indirilemedi!"))
+            return success, received
         except Exception as e:
             logging.error(f"Dosya indirme hatası: {e}")
-            self.root.after(0, lambda: messagebox.showerror("İndirme Hatası", 
-                                                           f"Dosya indirilemedi!\n\nHata: {str(e)}"))
-            self.handle_connection_lost()
-
-    def select_and_upload(self):
-        # Ekstra istemci taraflı kontrol
-        if not self.exam_started:
-            messagebox.showwarning("Uyarı", "Sınav henüz başlamadı!")
-            return
-            
-        # Birden fazla dosya seçimine izin ver
-        filepaths = filedialog.askopenfilenames(title="Gönderilecek Dosyaları Seçin (Birden fazla seçebilirsiniz)")
-        if not filepaths: return
-        
-        # Seçilen dosyaları sırayla gönder (thread içinde)
-        total_files = len(filepaths)
-        threading.Thread(target=self._upload_multiple_files, args=(filepaths, total_files), daemon=True).start()
+            return False, 0
     
-    def _upload_multiple_files(self, filepaths, total_files):
-        """Birden fazla dosyayı sırayla gönder"""
-        uploaded_count = 0
-        failed_files = []
-        
-        for idx, filepath in enumerate(filepaths):
-            filename = os.path.basename(filepath)
-            is_last = (idx == total_files - 1)
-            
-            logging.info(f"Dosya {idx + 1}/{total_files} gönderiliyor: {filename}")
-            
-            # Her dosyayı sırayla gönder (blocking - skip_shutdown=True ile)
-            # _upload_thread blocking olarak çalışıyor, bu yüzden dosyalar sırayla gönderilecek
-            success = self._upload_thread(filepath, filename, total_files=total_files, skip_shutdown=True)
-            
-            if success:
-                uploaded_count += 1
-                logging.info(f"Dosya {idx + 1}/{total_files} başarıyla gönderildi: {filename}")
-                if not is_last:
-                    # Son dosya değilse kısa bir bekleme
-                    time.sleep(0.5)
-            else:
-                failed_files.append(filename)
-                logging.error(f"Dosya {idx + 1}/{total_files} gönderilemedi: {filename}")
-        
-        # Tüm dosyalar gönderildikten sonra özet mesajı göster
-        if uploaded_count > 0:
-            if len(failed_files) == 0:
-                # Tüm dosyalar başarılı
-                if total_files == 1:
-                    self.root.after(0, self.finish_exam_shutdown)
-                else:
-                    self.root.after(0, lambda: messagebox.showinfo("Başarılı", 
-                                                                   f"Tüm dosyalar başarıyla gönderildi!\n\n"
-                                                                   f"Gönderilen: {uploaded_count} dosya"))
-                    # Son dosya gönderildiğinde sistemi kapat
-                    self.root.after(0, self.finish_exam_shutdown)
-            else:
-                # Bazı dosyalar başarısız
-                failed_list = "\n".join(failed_files)
-                self.root.after(0, lambda: messagebox.showwarning("Kısmi Başarı", 
-                                                                  f"Gönderilen: {uploaded_count} dosya\n"
-                                                                  f"Başarısız: {len(failed_files)} dosya\n\n"
-                                                                  f"Başarısız dosyalar:\n{failed_list}"))
-                # Yine de sistemi kapat (en az bir dosya gönderildi)
-                self.root.after(0, self.finish_exam_shutdown)
-
-    # --- Upload Progress UI Helpers ---
-    def show_upload_progress(self, filename):
-        """Yükleme sırasında gösterilecek progress bar penceresi"""
-        # Eğer zaten açıksa, sadece resetle
-        if self.upload_progress_window and self.upload_progress_window.winfo_exists():
-            self.upload_progress_var.set(0)
-            if self.upload_progress_label:
-                self.upload_progress_label.config(text=f"{filename} yükleniyor... %0")
-            return
-
-        self.upload_progress_window = tk.Toplevel(self.root)
-        self.upload_progress_window.title("Yükleniyor")
-        self.upload_progress_window.geometry("350x120")
-        self.upload_progress_window.resizable(False, False)
-        self.upload_progress_window.grab_set()  # Odak al
-
-        tk.Label(self.upload_progress_window, text="Dosya yükleniyor, lütfen bekleyin...", font=("Arial", 10)).pack(pady=5)
-        self.upload_progress_label = tk.Label(self.upload_progress_window, text=f"{filename} yükleniyor... %0")
-        self.upload_progress_label.pack(pady=5)
-
-        pb = ttk.Progressbar(self.upload_progress_window, orient="horizontal", length=300,
-                             mode="determinate", maximum=100, variable=self.upload_progress_var)
-        pb.pack(pady=5)
-
-    def update_upload_progress(self, percent, filename=None):
-        """Progress bar yüzdesini güncelle"""
-        if not (self.upload_progress_window and self.upload_progress_window.winfo_exists()):
-            return
-        self.upload_progress_var.set(percent)
-        if self.upload_progress_label:
-            if filename:
-                self.upload_progress_label.config(text=f"{filename} yükleniyor... %{percent:.1f}")
-            else:
-                self.upload_progress_label.config(text=f"Yükleniyor... %{percent:.1f}")
-
-    def close_upload_progress(self):
-        """Yükleme bittiğinde progress penceresini kapat"""
-        if self.upload_progress_window and self.upload_progress_window.winfo_exists():
-            try:
-                self.upload_progress_window.destroy()
-            except Exception:
-                pass
-        self.upload_progress_window = None
-        self.upload_progress_label = None
-        self.upload_progress_var.set(0)
-
-    def _upload_thread(self, filepath, filename, total_files=1, skip_shutdown=False):
-        """Dosya yükleme thread'i - uses ClientTransferHandler"""
+    def upload_file(self, filepath: str, filename: str, progress_callback=None) -> Tuple[bool, int]:
         if not self.is_connected or not self.transfer_handler:
-            self.root.after(0, lambda: messagebox.showerror("Hata", "Sunucuya bağlı değilsiniz!"))
-            return False
-            
+            return False, 0
+        
+        if not self.exam_started:
+            return False, 0
+        
         try:
             filesize = os.path.getsize(filepath)
             logging.info(f"Dosya yükleniyor: {filename} ({filesize} bytes)")
-
-            # Send upload command
+            
             upload_cmd = f"STOR {filename} {filesize}"
-            self.control_socket.send(upload_cmd.encode(FORMAT))
-            
-            # Show progress window
-            self.root.after(0, lambda: self.show_upload_progress(filename))
-            
-            # Use transfer handler for upload
-            def progress_callback(percent, fn):
-                self.root.after(0, lambda p=percent, f=fn: self.update_upload_progress(p, f))
+            self.control_socket.send(upload_cmd.encode(self.format))
             
             success, bytes_sent = self.transfer_handler.upload_file(
                 filepath, filename, self.ready_queue, progress_callback
             )
-            
-            if success:
-                logging.info(f"Dosya başarıyla yüklendi: {filename}")
-                self.root.after(0, lambda: self.update_upload_progress(100, filename))
-                
-                if not skip_shutdown and total_files == 1:
-                    self.root.after(0, self.finish_exam_shutdown)
-                
-                return True
-            else:
-                self.root.after(0, lambda: messagebox.showerror("Yükleme Hatası", 
-                                                                 "Dosya yüklenemedi!"))
-                return False
-        except socket.timeout:
-            logging.error("Dosya yükleme zaman aşımı")
-            self.root.after(0, lambda: messagebox.showerror("Zaman Aşımı", 
-                                                           "Dosya yükleme zaman aşımına uğradı!"))
-            return False
+            return success, bytes_sent
         except Exception as e:
             logging.error(f"Dosya yükleme hatası: {e}")
-            self.root.after(0, lambda: messagebox.showerror("Yükleme Hatası", 
-                                                           f"Dosya yüklenemedi!\n\nHata: {str(e)}"))
-            self.handle_connection_lost()
-            return False
-        finally:
-            # Hata durumunda da progress penceresini kapat
-            self.root.after(0, self.close_upload_progress)
-
-    def finish_exam_shutdown(self):
-        messagebox.showinfo("Başarılı", "Sınav dosyanız gönderildi. Sistem kapatılıyor.")
-        self.on_close()
-
-    def time_up_shutdown(self):
-        # Birden fazla kez çağrılmasını önle
-        if self.time_up_shutdown_called:
-            return
-        
-        self.time_up_shutdown_called = True
-        logging.info("Sınav süresi doldu - sistem kapatılıyor")
-        messagebox.showwarning("SÜRE BİTTİ", "Sınav süresi doldu! Sistem kapatılıyor.")
-        self.on_close()
-
-    def on_close(self):
+            return False, 0
+    
+    def quit(self):
         self.app_running = False
-        # QUIT komutunu gönder (FTP uyumluluğu için)
         if self.is_connected and self.control_socket:
             try:
-                self.control_socket.send("QUIT\n".encode(FORMAT))
+                self.control_socket.send("QUIT\n".encode(self.format))
                 self.control_socket.settimeout(2.0)
-                resp = self.control_socket.recv(BUFFER_SIZE).decode(FORMAT).strip()
+                resp = self.control_socket.recv(self.buffer_size).decode(self.format).strip()
                 logging.info(f"QUIT yanıtı: {resp}")
             except Exception as e:
                 logging.warning(f"QUIT komutu gönderilemedi: {e}")
         
-        try: 
+        try:
             if self.control_socket:
                 self.control_socket.close()
-        except: pass
-        try: self.root.destroy()
-        except: pass
-        os._exit(0)
+        except:
+            pass
+
+
+# SinavClientGUI moved to client_ui.py
+# This file now only contains ClientCore and helper functions
 
 if __name__ == "__main__":
+    # Import and run UI
+    from client_ui import SinavClientGUI
+    import tkinter as tk
     root = tk.Tk()
     app = SinavClientGUI(root)
     root.mainloop()
+

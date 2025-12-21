@@ -1,36 +1,26 @@
-"""Client-side file transfer utilities"""
 import socket
 import logging
 import time
 import queue
 from typing import Optional, Tuple
 from network_utils import parse_passive_port, create_client_socket
+from exceptions import NetworkConnectionError, FileTransferError, ProtocolViolationError
 
 FORMAT = "utf-8"
 
 
 class ClientTransferHandler:
-    """Handles file uploads and downloads for the client"""
     
     def __init__(self, control_socket: socket.socket, server_ip: str, buffer_size: int = 65536):
-        """
-        Initialize transfer handler with optimized buffer size
-        
-        Args:
-            buffer_size: Default 64KB (65536 bytes) for faster transfers
-        """
+
         self.control_socket = control_socket
         self.server_ip = server_ip
         # Use at least 64KB buffer for better performance
         self.buffer_size = max(buffer_size, 65536)
     
     def wait_for_227_message(self, ready_queue: queue.Queue, max_attempts: int = 20, 
-                            timeout: float = 2.0) -> Optional[int]:
-        """
-        Wait for 227 passive mode message and return data port
-        
-        Returns: data_port or None if failed
-        """
+                            timeout: float = 2.0) -> int:
+
         attempt = 0
         while attempt < max_attempts:
             # Check queue first
@@ -47,8 +37,11 @@ class ClientTransferHandler:
                     except queue.Full:
                         pass
                 elif resp.startswith("550"):
-                    logging.error(f"Hata mesajı alındı: {resp}")
-                    return None
+                    raise ProtocolViolationError(
+                        "Sunucu hata mesajı gönderdi",
+                        details=resp,
+                        command="227"
+                    )
                 elif resp.startswith("150"):
                     # 150 message - continue waiting
                     attempt += 1
@@ -73,8 +66,11 @@ class ClientTransferHandler:
                             logging.info(f"227 mesajı socket'ten alındı: {raw_resp}")
                             return port
                     elif raw_resp.startswith("550"):
-                        logging.error(f"Hata mesajı alındı: {raw_resp}")
-                        return None
+                        raise ProtocolViolationError(
+                            "Sunucu hata mesajı gönderdi",
+                            details=raw_resp,
+                            command="227"
+                        )
                     elif raw_resp.startswith("150") or raw_resp.startswith("CMD:"):
                         # Continue waiting
                         attempt += 1
@@ -82,22 +78,31 @@ class ClientTransferHandler:
                 except socket.timeout:
                     attempt += 1
                     if attempt >= max_attempts:
-                        logging.error("227 mesajı alınamadı - zaman aşımı")
-                        return None
+                        raise NetworkConnectionError(
+                            "227 mesajı alınamadı - zaman aşımı",
+                            details=f"{max_attempts} deneme sonrası",
+                            host="",
+                            port=0
+                        )
                     continue
+                except ProtocolViolationError:
+                    raise
                 except Exception as e:
-                    logging.error(f"227 mesajı okuma hatası: {e}")
-                    attempt += 1
-                    continue
+                    raise NetworkConnectionError(
+                        "227 mesajı okunamadı",
+                        details=str(e),
+                        host="",
+                        port=0
+                    ) from e
         
-        return None
+        raise NetworkConnectionError(
+            "227 mesajı alınamadı",
+            details=f"{max_attempts} deneme sonrası",
+            host="",
+            port=0
+        )
     
     def wait_for_ready_message(self, ready_queue: queue.Queue, timeout: float = 5.0) -> Optional[int]:
-        """
-        Wait for READY message and return filesize if present
-        
-        Returns: filesize (int) or None if no filesize in message
-        """
         # Check queue first
         try:
             ready_resp = ready_queue.get_nowait()
@@ -108,8 +113,11 @@ class ClientTransferHandler:
                         filesize = int(parts[1])
                         logging.info(f"READY mesajı queue'dan alındı: {ready_resp}")
                         return filesize
+                    else:
+                        # READY without filesize
+                        return None
                 except (ValueError, IndexError):
-                    pass
+                    return None
         except queue.Empty:
             pass
         
@@ -128,8 +136,10 @@ class ClientTransferHandler:
                             filesize = int(parts[1])
                             logging.info(f"READY mesajı queue'dan alındı (ikinci deneme): {ready_resp}")
                             return filesize
+                        else:
+                            return None
                     except (ValueError, IndexError):
-                        pass
+                        return None
             except queue.Empty:
                 pass
             
@@ -144,22 +154,29 @@ class ClientTransferHandler:
                             filesize = int(parts[1])
                             logging.info(f"READY mesajı socket'ten alındı: {ready_resp}")
                             return filesize
+                        else:
+                            return None
                     except (ValueError, IndexError):
-                        pass
+                        return None
         except socket.timeout:
-            logging.warning("READY mesajı zaman aşımı")
+            # Timeout is acceptable for READY (may not have filesize)
+            logging.warning("READY mesajı zaman aşımı (normal olabilir)")
+            return None
         except Exception as e:
-            logging.error(f"READY mesajı okuma hatası: {e}")
+            raise NetworkConnectionError(
+                "READY mesajı okunamadı",
+                details=str(e),
+                host="",
+                port=0
+            ) from e
         
         return None
     
-    def connect_to_data_port(self, data_port: int, timeout: float = 10.0) -> Optional[socket.socket]:
-        """Connect to server data port with optimized settings"""
-        time.sleep(0.1)  # Reduced wait time (was 0.3)
+    def connect_to_data_port(self, data_port: int, timeout: float = 10.0) -> socket.socket:
+        time.sleep(0.1)  #  wait time 
         
         try:
             data_socket = create_client_socket(timeout)
-            # Additional optimizations for data socket
             try:
                 data_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 256 * 1024)  # 256KB
                 data_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 256 * 1024)  # 256KB
@@ -171,26 +188,46 @@ class ClientTransferHandler:
             data_socket.connect((self.server_ip, data_port))
             logging.info(f"Data port'a bağlandı: {self.server_ip}:{data_port}")
             return data_socket
+        except socket.timeout:
+            raise NetworkConnectionError(
+                f"Data port bağlantısı zaman aşımı",
+                details=f"{self.server_ip}:{data_port}",
+                host=self.server_ip,
+                port=data_port
+            )
         except Exception as e:
-            logging.error(f"Data port bağlantı hatası: {e}")
-            return None
+            raise NetworkConnectionError(
+                f"Data port bağlantı hatası",
+                details=str(e),
+                host=self.server_ip,
+                port=data_port
+            ) from e
     
     def download_file(self, filename: str, save_path: str, ready_queue: queue.Queue,
                      filesize: Optional[int] = None, timeout: float = 300.0) -> Tuple[bool, int]:
-        """
-        Download file from server
-        
-        Returns: (success, bytes_received)
-        """
         # Wait for 227 message
-        data_port = self.wait_for_227_message(ready_queue)
-        if not data_port:
-            return False, 0
+        try:
+            data_port = self.wait_for_227_message(ready_queue)
+        except (NetworkConnectionError, ProtocolViolationError) as e:
+            raise FileTransferError(
+                f"Dosya indirme başlatılamadı: {filename}",
+                details=e.details,
+                filename=filename,
+                expected_size=0,
+                actual_size=0
+            ) from e
         
         # Connect to data port
-        data_socket = self.connect_to_data_port(data_port)
-        if not data_socket:
-            return False, 0
+        try:
+            data_socket = self.connect_to_data_port(data_port)
+        except NetworkConnectionError as e:
+            raise FileTransferError(
+                f"Data port'a bağlanılamadı: {filename}",
+                details=e.details,
+                filename=filename,
+                expected_size=0,
+                actual_size=0
+            ) from e
         
         try:
             # Wait for READY message (reduced wait time)
@@ -236,8 +273,13 @@ class ClientTransferHandler:
                                 logging.info(f"İndirme ilerlemesi: %{progress:.1f} ({received}/{filesize} bytes, {speed/1024:.1f} KB/s)")
                                 last_progress_time = current_time
                         except socket.timeout:
-                            logging.error(f"İndirme zaman aşımı: {received}/{filesize} bytes")
-                            break
+                            raise FileTransferError(
+                                f"Dosya indirme zaman aşımı: {filename}",
+                                details=f"Alınan: {received}/{filesize} bytes",
+                                filename=filename,
+                                expected_size=filesize,
+                                actual_size=received
+                            )
                 else:
                     # Unknown size
                     while True:
@@ -251,7 +293,13 @@ class ClientTransferHandler:
                             if received > 0:
                                 logging.info(f"İndirme tamamlandı (bilinmeyen boyut): {received} bytes")
                                 break
-                            raise
+                            raise FileTransferError(
+                                f"Dosya indirme zaman aşımı: {filename}",
+                                details=f"Alınan: {received} bytes (bilinmeyen boyut)",
+                                filename=filename,
+                                expected_size=0,
+                                actual_size=received
+                            )
             
             # Wait for completion message
             try:
@@ -261,8 +309,27 @@ class ClientTransferHandler:
             except socket.timeout:
                 logging.warning("İndirme onayı zaman aşımı (dosya indirildi olabilir)")
             
+            if filesize and received != filesize:
+                raise FileTransferError(
+                    f"Dosya indirme tamamlanamadı: {filename}",
+                    details=f"Beklenen: {filesize} bytes, Alınan: {received} bytes",
+                    filename=filename,
+                    expected_size=filesize,
+                    actual_size=received
+                )
+            
             return True, received
             
+        except (FileTransferError, NetworkConnectionError):
+            raise
+        except Exception as e:
+            raise FileTransferError(
+                f"Dosya indirme hatası: {filename}",
+                details=str(e),
+                filename=filename,
+                expected_size=filesize or 0,
+                actual_size=0
+            ) from e
         finally:
             try:
                 data_socket.close()
@@ -271,36 +338,39 @@ class ClientTransferHandler:
     
     def upload_file(self, filepath: str, filename: str, ready_queue: queue.Queue,
                    progress_callback=None, timeout: float = 300.0) -> Tuple[bool, int]:
-        """
-        Upload file to server
-        
-        Args:
-            filepath: Local file path
-            filename: Remote filename
-            ready_queue: Queue for receiving messages
-            progress_callback: Optional callback(percent, filename) for progress updates
-            timeout: Timeout in seconds
-        
-        Returns: (success, bytes_sent)
-        """
         import os
         filesize = os.path.getsize(filepath)
         
         # Wait for 227 message
-        data_port = self.wait_for_227_message(ready_queue)
-        if not data_port:
-            return False, 0
+        try:
+            data_port = self.wait_for_227_message(ready_queue)
+        except (NetworkConnectionError, ProtocolViolationError) as e:
+            raise FileTransferError(
+                f"Dosya yükleme başlatılamadı: {filename}",
+                details=e.details,
+                filename=filename,
+                expected_size=filesize,
+                actual_size=0
+            ) from e
         
         # Connect to data port
-        data_socket = self.connect_to_data_port(data_port)
-        if not data_socket:
-            return False, 0
+        try:
+            data_socket = self.connect_to_data_port(data_port)
+        except NetworkConnectionError as e:
+            raise FileTransferError(
+                f"Data port'a bağlanılamadı: {filename}",
+                details=e.details,
+                filename=filename,
+                expected_size=filesize,
+                actual_size=0
+            ) from e
         
         try:
             # Wait for READY message (reduced wait time)
             time.sleep(0.1)  # Reduced from 0.2
-            ready_filesize = self.wait_for_ready_message(ready_queue, timeout=20.0)
-            if ready_filesize is None and not ready_filesize:
+            try:
+                ready_filesize = self.wait_for_ready_message(ready_queue, timeout=20.0)
+            except NetworkConnectionError:
                 logging.warning("READY mesajı alınamadı, devam ediliyor...")
             
             # Calculate timeout
@@ -319,8 +389,13 @@ class ClientTransferHandler:
                         data_socket.sendall(chunk)
                         bytes_sent += len(chunk)
                     except socket.timeout:
-                        logging.error(f"Yükleme zaman aşımı: {bytes_sent}/{filesize} bytes")
-                        break
+                        raise FileTransferError(
+                            f"Dosya yükleme zaman aşımı: {filename}",
+                            details=f"Gönderilen: {bytes_sent}/{filesize} bytes",
+                            filename=filename,
+                            expected_size=filesize,
+                            actual_size=bytes_sent
+                        )
                     
                     # Progress callback (less frequent for better performance)
                     if progress_callback:
@@ -329,6 +404,15 @@ class ClientTransferHandler:
                         if bytes_sent % (5 * 1024 * 1024) == 0 or bytes_sent == filesize:
                             logging.info(f"Yükleme ilerlemesi: %{progress:.1f}")
                             progress_callback(progress, filename)
+            
+            if bytes_sent != filesize:
+                raise FileTransferError(
+                    f"Dosya yükleme tamamlanamadı: {filename}",
+                    details=f"Gönderilen: {bytes_sent}/{filesize} bytes",
+                    filename=filename,
+                    expected_size=filesize,
+                    actual_size=bytes_sent
+                )
             
             # Wait for completion message
             try:
@@ -340,6 +424,16 @@ class ClientTransferHandler:
             
             return True, bytes_sent
             
+        except (FileTransferError, NetworkConnectionError):
+            raise
+        except Exception as e:
+            raise FileTransferError(
+                f"Dosya yükleme hatası: {filename}",
+                details=str(e),
+                filename=filename,
+                expected_size=filesize,
+                actual_size=0
+            ) from e
         finally:
             try:
                 data_socket.close()
