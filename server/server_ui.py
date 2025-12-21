@@ -4,9 +4,8 @@ from tkinter import ttk, messagebox, simpledialog
 import logging
 import os
 from datetime import datetime
-from config_manager import get_config
+from common import get_config, NetworkConnectionError
 from server import ServerCore, load_students, connected_students
-from exceptions import NetworkConnectionError
 
 config = get_config()
 
@@ -190,8 +189,8 @@ class TeacherServerGUI:
 • Başlangıç zamanı: {start_time_display}
 
 📁 Dosya Durumu:
-• Soru dosyası sayısı: {len(os.listdir('Sorular')) if os.path.exists('Sorular') else 0}
-• Teslim edilen cevap: {len(os.listdir('Cevaplar')) if os.path.exists('Cevaplar') else 0}
+• Soru dosyası sayısı: {len(os.listdir('data/questions')) if os.path.exists('data/questions') else 0}
+• Teslim edilen cevap: {len(os.listdir('data/answers')) if os.path.exists('data/answers') else 0}
 
 🔗 Bağlantı Detayları:"""
         

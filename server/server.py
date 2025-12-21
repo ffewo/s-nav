@@ -1,4 +1,3 @@
-"""Sınav Sistemi - Öğretmen Sunucu Core Logic"""
 import socket
 import threading
 import os
@@ -6,9 +5,9 @@ import time
 import logging
 from datetime import datetime
 import json
-from config_manager import get_config
-from network_utils import create_server_socket
-from protocol_handlers import ProtocolHandler
+from common import get_config
+from common.network_utils import create_server_socket
+from server.protocol_handlers import ProtocolHandler
 
 # Konfigürasyonu yükle
 config = get_config()
@@ -21,7 +20,7 @@ FORMAT = "utf-8"
 MAX_CONNECTIONS = config.get("server.max_connections", 50)
 
 # Dizinleri oluştur
-for directory in ["Sorular", "Cevaplar", "Logs"]:
+for directory in ["data/questions", "data/answers", "logs"]:
     if not os.path.exists(directory): 
         os.makedirs(directory)
 
@@ -31,7 +30,7 @@ logging.basicConfig(
     level=log_level,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('Logs/server.log'),
+        logging.FileHandler('logs/server.log'),
         logging.StreamHandler()
     ]
 )
@@ -43,7 +42,7 @@ def load_students():
     """Öğrenci veritabanını yükle"""
     students = {}
     try:
-        with open("students.txt", "r", encoding="utf-8") as f:
+        with open("config/students.txt", "r", encoding="utf-8") as f:
             line_count = 0
             for line in f:
                 line_count += 1
@@ -60,7 +59,7 @@ def load_students():
                         logging.warning(f"Eksik veri satır {line_count}: {line}")
         logging.info(f"{len(students)} öğrenci yüklendi")
     except FileNotFoundError:
-        logging.warning("students.txt bulunamadı")
+        logging.warning("config/students.txt bulunamadı")
     except Exception as e:
         logging.error(f"Öğrenci veritabanı yükleme hatası: {e}")
         students = {}
@@ -98,7 +97,7 @@ def log_student_activity(student_no, activity):
         
         student_activities[student_no].append(activity)
         
-        log_file = f"Logs/student_{student_no}_activity.log"
+        log_file = f"logs/student_{student_no}_activity.log"
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(f"{activity['timestamp']} - {activity['action']} - {json.dumps(activity)}\n")
     except Exception as e:

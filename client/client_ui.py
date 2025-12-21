@@ -5,10 +5,9 @@ import os
 import sys
 import time
 import logging
-from config_manager import get_config
+from common import get_config, NetworkConnectionError, FileTransferError, ProtocolViolationError
+from common.security_manager import SecurityManager
 from client import ClientCore
-from security_manager import SecurityManager
-from exceptions import NetworkConnectionError, FileTransferError, ProtocolViolationError
 try:
     import winsound
 except ImportError:
@@ -27,9 +26,19 @@ class SinavClientGUI:
         self.root.geometry(f"{width}x{height}")
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         
-        # Security manager
-        banned_apps = config.get("security.banned_applications", 
-                                 ["chrome.exe", "firefox.exe", "msedge.exe", "opera.exe", "brave.exe"])
+        # Security manager - Use hardcoded list for security (not from config)
+        # Config'den alınmaz çünkü öğrenciler config dosyasını değiştirebilir
+        banned_apps = [
+            "chrome.exe",
+            "firefox.exe", 
+            "msedge.exe",
+            "opera.exe",
+            "safari.exe",
+            "brave.exe",
+            "vivaldi.exe",
+            "tor.exe",
+            "tor-browser.exe"
+        ]
         self.security_manager = SecurityManager(banned_apps)
         self.app_running = True
         self.security_manager.start_monitoring(lambda: self.app_running)

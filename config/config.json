@@ -1,0 +1,23 @@
+{
+    "server": {
+        "host": "0.0.0.0",
+        "port": 2121,
+        "data_port_min": 49152,
+        "data_port_max": 65535,
+        "max_connections": 50,
+        "buffer_size": 65536,
+        "max_file_size_mb": 50
+    },
+    "client": {
+        "server_ip": "127.0.0.1",
+        "reconnect_attempts": 5,
+        "reconnect_delay": 3
+    },
+    "logging": {
+        "level": "INFO"
+    },
+    "ui": {
+        "window_width": 900,
+        "window_height": 600
+    }
+}

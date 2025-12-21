@@ -4,7 +4,7 @@ import random
 import logging
 import time
 from typing import Tuple, Optional
-from exceptions import NetworkConnectionError, FileTransferError
+from common.exceptions import NetworkConnectionError, FileTransferError
 
 FORMAT = "utf-8"
 

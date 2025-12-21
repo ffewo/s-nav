@@ -6,8 +6,8 @@ import logging
 import queue
 from typing import Tuple
 from datetime import datetime
-from config_manager import get_config
-from client_transfer import ClientTransferHandler
+from common import get_config
+from client.client_transfer import ClientTransferHandler
 
 # Konfigürasyonu yükle
 config = get_config()
@@ -37,7 +37,7 @@ for handler in root_logger.handlers[:]:
     root_logger.removeHandler(handler)
 
 # File handler oluştur (append mode)
-file_handler = logging.FileHandler('Logs/client.log', mode='a', encoding='utf-8')
+file_handler = logging.FileHandler('logs/client.log', mode='a', encoding='utf-8')
 file_handler.setLevel(log_level)
 file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 
@@ -54,7 +54,7 @@ root_logger.addHandler(console_handler)
 logging.info("="*50)
 logging.info("Sınav sistemi client başlatıldı")
 logging.info(f"Log seviyesi: {log_level}")
-logging.info(f"Log dosyası: Logs/client.log")
+logging.info(f"Log dosyası: logs/client.log")
 
 
 class ClientCore:

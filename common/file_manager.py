@@ -14,7 +14,7 @@ import json
 class SecureFileHandler:
     """Güvenli dosya işleyici"""
     
-    def __init__(self, base_dir: str = "Cevaplar"):
+    def __init__(self, base_dir: str = "data/answers"):
         self.base_dir = base_dir
         self.ensure_directory_exists(base_dir)
         
@@ -148,7 +148,7 @@ class SecureFileHandler:
 class QuestionFileManager:
     """Soru dosyası yöneticisi"""
     
-    def __init__(self, questions_dir: str = "Sorular"):
+    def __init__(self, questions_dir: str = "data/questions"):
         self.questions_dir = questions_dir
         self.ensure_directory_exists(questions_dir)
     

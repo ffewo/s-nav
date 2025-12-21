@@ -6,7 +6,7 @@ from typing import Dict, Any, Optional
 class ConfigManager:
 
     
-    def __init__(self, config_file: str = "config.json"):
+    def __init__(self, config_file: str = "config/config.json"):
         self.config_file = config_file
         self.config = self._load_config()
         

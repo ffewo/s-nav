@@ -3,8 +3,8 @@ import logging
 import time
 import queue
 from typing import Optional, Tuple
-from network_utils import parse_passive_port, create_client_socket
-from exceptions import NetworkConnectionError, FileTransferError, ProtocolViolationError
+from common.network_utils import parse_passive_port, create_client_socket
+from common import NetworkConnectionError, FileTransferError, ProtocolViolationError
 
 FORMAT = "utf-8"
 
