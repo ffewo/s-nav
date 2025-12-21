@@ -625,14 +625,4 @@ class ClientCore:
             pass
 
 
-# SinavClientGUI moved to client_ui.py
-# This file now only contains ClientCore and helper functions
-
-if __name__ == "__main__":
-    # Import and run UI
-    from client_ui import SinavClientGUI
-    import tkinter as tk
-    root = tk.Tk()
-    app = SinavClientGUI(root)
-    root.mainloop()
 

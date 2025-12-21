@@ -28,16 +28,13 @@ MAX_FILE_SIZE = config.get("server.max_file_size_mb", 50) * 1024 * 1024
 
 
 class ProtocolHandler:
-    """Handles FTP-like protocol commands"""
-    
-    # Class-level lock for login operations (shared across all instances)
+
     _login_lock = threading.Lock()
-    _pending_logins = {}  # Track pending logins: {student_no: (conn, timestamp)}
-    _pending_login_timeout = 30  # Timeout in seconds for pending logins
+    _pending_logins = {}
+    _pending_login_timeout = 30
     
     @staticmethod
     def _safe_send(conn: socket.socket, message: str) -> bool:
-        """Safely send message to socket"""
         if not conn:
             return False
         try:
@@ -51,7 +48,6 @@ class ProtocolHandler:
     
     @staticmethod
     def _force_disconnect(conn: socket.socket) -> None:
-        """Forcefully disconnect a socket connection"""
         if not conn:
             return
         try:
@@ -67,7 +63,6 @@ class ProtocolHandler:
     
     @staticmethod
     def _cleanup_stale_pending_logins() -> None:
-        """Clean up stale pending logins that have timed out"""
         current_time = time.time()
         stale_keys = []
         for student_no, login_info in ProtocolHandler._pending_logins.items():
@@ -85,7 +80,6 @@ class ProtocolHandler:
     
     @staticmethod
     def _safe_check_connection(conn: socket.socket) -> bool:
-        """Aggressively check if connection is still alive using heartbeat verification"""
         if not conn:
             return False
         try:
@@ -140,11 +134,6 @@ class ProtocolHandler:
                        student_no: str, student_name: str, connection_time: str,
                        pending_username: Optional[str], passive_data_socket: Optional[socket.socket],
                        passive_data_port: Optional[int]) -> Tuple[Optional[str], Optional[socket.socket], Optional[int], bool]:
-        """
-        Dispatch command to appropriate handler
-        
-        Returns: (new_student_no, new_passive_socket, new_passive_port, should_break)
-        """
         handler = self.commands.get(cmd.upper())
         if handler:
             return handler(parts, conn, addr, student_no, student_name, connection_time,
@@ -159,7 +148,6 @@ class ProtocolHandler:
                     student_no: str, student_name: str, connection_time: str,
                     pending_username: Optional[str], passive_data_socket: Optional[socket.socket],
                     passive_data_port: Optional[int]) -> Tuple[str, Optional[socket.socket], Optional[int], bool]:
-        """Handle USER command"""
         if self.exam_started():
             if not self._safe_send(conn, "550 SINAV_BASLADI_GIRIS_YASAK\n"):
                 return student_no, passive_data_socket, passive_data_port, True
@@ -438,7 +426,6 @@ class ProtocolHandler:
                     student_no: str, student_name: str, connection_time: str,
                     pending_username: Optional[str], passive_data_socket: Optional[socket.socket],
                     passive_data_port: Optional[int]) -> Tuple[str, Optional[socket.socket], Optional[int], bool]:
-        """Handle PASV command"""
         if student_no == "Bilinmiyor":
             conn.send("530 Please login with USER and PASS.\n".encode(FORMAT))
             return student_no, passive_data_socket, passive_data_port, False
@@ -487,7 +474,6 @@ class ProtocolHandler:
                     student_no: str, student_name: str, connection_time: str,
                     pending_username: Optional[str], passive_data_socket: Optional[socket.socket],
                     passive_data_port: Optional[int]) -> Tuple[str, Optional[socket.socket], Optional[int], bool]:
-        """Handle QUIT command"""
         conn.send("221 Goodbye.\n".encode(FORMAT))
         logging.info(f"QUIT komutu alındı: {student_no} ({addr[0]})")
         return student_no, passive_data_socket, passive_data_port, True
@@ -496,7 +482,6 @@ class ProtocolHandler:
                     student_no: str, student_name: str, connection_time: str,
                     pending_username: Optional[str], passive_data_socket: Optional[socket.socket],
                     passive_data_port: Optional[int]) -> Tuple[str, Optional[socket.socket], Optional[int], bool]:
-        """Handle LIST command"""
         if student_no == "Bilinmiyor":
             conn.send("530 Please login with USER and PASS.\n".encode(FORMAT))
             return student_no, passive_data_socket, passive_data_port, False
@@ -525,7 +510,6 @@ class ProtocolHandler:
                     student_no: str, student_name: str, connection_time: str,
                     pending_username: Optional[str], passive_data_socket: Optional[socket.socket],
                     passive_data_port: Optional[int]) -> Tuple[str, Optional[socket.socket], Optional[int], bool]:
-        """Handle STOR (upload) command"""
         if student_no == "Bilinmiyor":
             conn.send("530 Please login with USER and PASS.\n".encode(FORMAT))
             return student_no, passive_data_socket, passive_data_port, False
@@ -919,7 +903,6 @@ class ProtocolHandler:
                     student_no: str, student_name: str, connection_time: str,
                     pending_username: Optional[str], passive_data_socket: Optional[socket.socket],
                     passive_data_port: Optional[int]) -> Tuple[str, Optional[socket.socket], Optional[int], bool]:
-        """Handle PING command"""
         conn.send("PONG\n".encode(FORMAT))
         if student_no in self.connected_students:
             self.connected_students[student_no]["last_activity"] = datetime.now()
@@ -927,7 +910,6 @@ class ProtocolHandler:
     
     def _get_data_port(self, passive_socket: Optional[socket.socket], 
                       passive_port: Optional[int], student_no: str) -> Tuple[socket.socket, int, bool]:
-        """Get data port - use PASV if available, otherwise create new"""
         if passive_socket and passive_port:
             logging.info(f"PASV ile açılmış data port kullanılıyor: {passive_port} (öğrenci: {student_no})")
             return passive_socket, passive_port, True

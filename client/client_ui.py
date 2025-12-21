@@ -22,8 +22,6 @@ class SinavClientGUI:
         self.root.geometry(f"{width}x{height}")
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         
-        # Security manager - Use hardcoded list for security (not from config)
-        # Config'den alınmaz çünkü öğrenciler config dosyasını değiştirebilir
         banned_apps = [
             "chrome.exe",
             "firefox.exe", 

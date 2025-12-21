@@ -1,4 +1,3 @@
-"""Sınav Sistemi - Öğretmen Sunucu UI"""
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 import logging
@@ -11,7 +10,6 @@ config = get_config()
 
 
 class TeacherServerGUI:
-    """Teacher Server UI - Uses ServerCore for all business logic"""
     
     def __init__(self, root):
         self.root = root
@@ -21,7 +19,6 @@ class TeacherServerGUI:
         self.root.geometry(f"{width}x{height}")
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         
-        # Initialize ServerCore with UI update callback
         self.core = ServerCore(ui_update_callback=self.update_ui_list)
         self.start_time = None
         
@@ -32,7 +29,6 @@ class TeacherServerGUI:
         self.update_timer_display()
     
     def setup_ui(self):
-        """UI bileşenlerini oluştur"""
         # Üst kontrol paneli
         top_frame = tk.Frame(self.root, pady=10, bg="#f0f0f0")
         top_frame.pack(side=tk.TOP, fill=tk.X)

@@ -397,11 +397,3 @@ class ServerCore:
             pass
         
         logging.info("Sunucu kapatıldı")
-
-if __name__ == "__main__":
-    # Import and run UI
-    from server_ui import TeacherServerGUI
-    import tkinter as tk
-    root = tk.Tk()
-    app = TeacherServerGUI(root)
-    root.mainloop()

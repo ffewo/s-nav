@@ -173,7 +173,7 @@ class ClientTransferHandler:
         return None
     
     def connect_to_data_port(self, data_port: int, timeout: float = 10.0) -> socket.socket:
-        time.sleep(0.1)  #  wait time 
+        time.sleep(0.1)
         
         try:
             data_socket = create_client_socket(timeout)
@@ -205,7 +205,6 @@ class ClientTransferHandler:
     
     def download_file(self, filename: str, save_path: str, ready_queue: queue.Queue,
                      filesize: Optional[int] = None, timeout: float = 300.0) -> Tuple[bool, int]:
-        # Wait for 227 message
         try:
             data_port = self.wait_for_227_message(ready_queue)
         except (NetworkConnectionError, ProtocolViolationError) as e:
