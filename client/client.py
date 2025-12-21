@@ -59,12 +59,13 @@ logging.info(f"Log dosyası: logs/client.log")
 
 class ClientCore:
     
-    def __init__(self, ui_status_callback=None, ui_timer_callback=None, ui_message_callback=None, ui_exam_started_callback=None):
+    def __init__(self, ui_status_callback=None, ui_timer_callback=None, ui_message_callback=None, ui_exam_started_callback=None, ui_shutdown_callback=None):
 
         self.ui_status_callback = ui_status_callback
         self.ui_timer_callback = ui_timer_callback
         self.ui_message_callback = ui_message_callback
         self.ui_exam_started_callback = ui_exam_started_callback
+        self.ui_shutdown_callback = ui_shutdown_callback
         
         # Load config
         self.server_ip = config.get("client.server_ip", "127.0.0.1")
@@ -382,13 +383,35 @@ class ClientCore:
             self.current_timer.start()
     
     def time_up_shutdown(self):
-        """Handle time up"""
+        """Handle time up - shutdown client application"""
         if self.time_up_shutdown_called:
             return
         self.time_up_shutdown_called = True
         logging.info("Sınav süresi doldu - sistem kapatılıyor")
         if self.ui_message_callback:
             self.ui_message_callback("Sınav süresi doldu! Sistem kapatılıyor.", "SÜRE BİTTİ", "warning")
+        
+        # Stop all operations
+        self.app_running = False
+        self.is_connected = False
+        
+        # Close connection
+        try:
+            if self.control_socket:
+                self.control_socket.close()
+        except:
+            pass
+        
+        # Call UI shutdown callback to close the application
+        if self.ui_shutdown_callback:
+            # Delay shutdown slightly to allow message to be displayed
+            import threading
+            threading.Timer(2.0, self.ui_shutdown_callback).start()
+        else:
+            # Fallback: exit directly if no callback
+            import sys
+            import threading
+            threading.Timer(2.0, lambda: sys.exit(0)).start()
     
     def login(self, student_no: str, password: str) -> bool:
         """Login to server with retry mechanism"""

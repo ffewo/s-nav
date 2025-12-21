@@ -53,7 +53,8 @@ class SinavClientGUI:
             ui_status_callback=self.update_status,
             ui_timer_callback=self.update_timer,
             ui_message_callback=self.show_message,
-            ui_exam_started_callback=self.activate_upload_button
+            ui_exam_started_callback=self.activate_upload_button,
+            ui_shutdown_callback=self.on_close
         )
         
         logging.info("Sınav sistemi başlatıldı")
