@@ -8,10 +8,6 @@ import logging
 from common import get_config, NetworkConnectionError, FileTransferError, ProtocolViolationError
 from common.security_manager import SecurityManager
 from client import ClientCore
-try:
-    import winsound
-except ImportError:
-    winsound = None
 
 config = get_config()
 

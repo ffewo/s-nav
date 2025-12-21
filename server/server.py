@@ -208,7 +208,7 @@ class ServerCore:
                     # Update state based on command
                     if cmd == "USER":
                         pending_username = new_student_no if new_student_no != "Bilinmiyor" else None
-                    elif cmd == "PASS" or cmd == "LOGIN":
+                    elif cmd == "PASS":
                         if new_student_no != "Bilinmiyor":
                             student_no = new_student_no
                             pending_username = None

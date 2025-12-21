@@ -5,28 +5,11 @@ import time
 import logging
 import queue
 from typing import Tuple
-from datetime import datetime
 from common import get_config
 from client.client_transfer import ClientTransferHandler
 
 # Konfigürasyonu yükle
 config = get_config()
-
-# --- AYARLAR ---
-# Önce ip.txt dosyasını kontrol et 
-SERVER_IP = config.get("client.server_ip", "127.0.0.1")
-if os.path.exists("ip.txt"):
-    with open("ip.txt", "r") as f: 
-        ip_from_file = f.read().strip()
-        if ip_from_file:
-            SERVER_IP = ip_from_file
-
-CONTROL_PORT = config.get("server.port", 2121)
-DATA_PORT = config.get("server.data_port", 2122)
-BUFFER_SIZE = config.get("server.buffer_size", 4096)
-FORMAT = "utf-8"
-RECONNECT_ATTEMPTS = config.get("client.reconnect_attempts", 5)
-RECONNECT_DELAY = config.get("client.reconnect_delay", 3)
 
 # Logging ayarları - config'den al
 log_level = getattr(logging, config.get("logging.level", "INFO").upper())
@@ -314,12 +297,11 @@ class ClientCore:
             logging.error(f"Sync parse hatası: {e}")
     
     def _handle_cmd_time_up(self, data: str):
-        """Handle CMD:TIME_UP command"""
+        
         if not self.time_up_shutdown_called:
             self.time_up_shutdown()
     
     def _handle_server_shutdown(self, data: str):
-        """Handle CMD:SERVER_SHUTDOWN command - server is closing"""
         logging.info("Sunucu kapatılıyor - yeniden bağlanma denemeleri durduruluyor")
         self.is_connected = False
         self.app_running = False  # Stop all operations
@@ -346,7 +328,6 @@ class ClientCore:
                 self.ui_exam_started_callback()
     
     def start_countdown(self, seconds: int):
-        """Start countdown timer"""
         # Cancel existing timer if any (for time extension)
         if self.current_timer:
             try:
@@ -383,7 +364,6 @@ class ClientCore:
             self.current_timer.start()
     
     def time_up_shutdown(self):
-        """Handle time up - shutdown client application"""
         if self.time_up_shutdown_called:
             return
         self.time_up_shutdown_called = True
@@ -414,7 +394,6 @@ class ClientCore:
             threading.Timer(2.0, lambda: sys.exit(0)).start()
     
     def login(self, student_no: str, password: str) -> bool:
-        """Login to server with retry mechanism"""
         if not self.is_connected:
             if self.ui_message_callback:
                 self.ui_message_callback("Sunucuya bağlı değilsiniz!", "Hata", "error")
